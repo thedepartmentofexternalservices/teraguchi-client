@@ -155,6 +155,8 @@ public:
 
     static void postTabletCursorActivationEvent();
 
+    void rejectVideoContract();
+
     void updateRenderedStats(float fps, float videoMbps)
     {
         m_CurrentRenderedFps.store(fps, std::memory_order_relaxed);
@@ -393,6 +395,7 @@ private:
     bool m_ThreadedExec;
     bool m_UnexpectedTermination;
     std::atomic_bool m_ReconnectRequested;
+    std::atomic_bool m_VideoContractRejected {false};
     std::atomic<Uint64> m_DesktopHandoffNoticeDeadline {0};
     std::atomic_bool m_ReconnectGreeterConfirmed {false};
     std::atomic<Uint64> m_LastPlankVideoReceived {0};

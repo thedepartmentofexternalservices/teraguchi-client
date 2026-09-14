@@ -1,6 +1,13 @@
 QT += core quick network quickcontrols2 svg
 CONFIG += c++17
 
+contains(CONFIG, teraguchi-strict-video) {
+    !macx: error("Teraguchi strict video is available only for Mac builds")
+    DEFINES += TERAGUCHI_STRICT_VIDEO
+}
+HEADERS += streaming/video/decoderpolicy.h \
+    streaming/video/teraguchivideo.h streaming/video/teraguchiframe.h
+
 unix:contains(CONFIG, plank-transport) {
     isEmpty(PLANK_TRANSPORT_DIR) {
         PLANK_TRANSPORT_DIR = $$(PLANK_TRANSPORT_DIR)

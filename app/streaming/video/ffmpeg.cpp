@@ -1,5 +1,11 @@
 #include <Limelight.h>
 #include "ffmpeg.h"
+#ifdef TERAGUCHI_STRICT_VIDEO
+#include "teraguchiframe.h"
+extern "C" {
+#include <libavcodec/videotoolbox.h>
+}
+#endif
 #include "applevideoprofile.h"
 #include "applevideo-test-frame.h"
 #include "streaming/session.h"
@@ -1760,6 +1766,8 @@ bool FFmpegVideoDecoder::tryInitializeNonHwAccelDecoder(PDECODER_PARAMETERS para
 
 bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
 {
+    m_ExpectedVideoWidth = params->width;
+    m_ExpectedVideoHeight = params->height;
     m_CaptureSource = params->captureSource;
     m_EncoderBackend = params->encoderBackend;
 
@@ -1918,6 +1926,19 @@ void FFmpegVideoDecoder::decoderThreadProc()
             do {
                 err = avcodec_receive_frame(m_VideoDecoderCtx, frame);
                 if (err == 0) {
+#ifdef TERAGUCHI_STRICT_VIDEO
+                    if (!teraguchiNativeFrameMatches(frame,
+                            m_VideoDecoderCtx->codec_id, m_VideoDecoderCtx->profile,
+                            av_videotoolbox_is_hardware_accelerated(m_VideoDecoderCtx),
+                            m_ExpectedVideoWidth, m_ExpectedVideoHeight)) {
+                        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                     "Teraguchi rejected a frame outside its hardware/format contract; disconnecting");
+                        SDL_SetAtomicInt(&m_DecoderThreadShouldQuit, 1);
+                        Session::get()->rejectVideoContract();
+                        av_frame_free(&frame);
+                        return;
+                    }
+#endif
                     if (m_CaptureSource == DecoderCaptureSource::ScreenCaptureKit &&
                             !plankAppleVideoFrameMatches(frame, m_VideoDecoderCtx->profile, m_VideoFormat == VIDEO_FORMAT_H265_REXT10_444)) {
                         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,

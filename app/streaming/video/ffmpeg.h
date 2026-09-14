@@ -123,6 +123,8 @@ private:
     int m_LastFrameNumber;
     int m_StreamFps;
     int m_VideoFormat;
+    int m_ExpectedVideoWidth = 0;
+    int m_ExpectedVideoHeight = 0;
     DecoderCaptureSource m_CaptureSource;
     DecoderEncoderBackend m_EncoderBackend;
     bool m_IdentityGbrEnabled;

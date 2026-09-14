@@ -1,4 +1,5 @@
 #include "session.h"
+#include "video/teraguchivideo.h"
 #include "streaming/clientframeflowtrace.h"
 #include "backend/hostrecovery.h"
 #include "backend/planknetwork.h"
@@ -333,6 +334,20 @@ void Session::postTabletCursorActivationEvent()
     SDL_PushEvent(&event);
 }
 
+void Session::rejectVideoContract()
+{
+    // Keep this terminal state even if the event queue is full or reconnect
+    // consumes the wakeup. The session loop checks it before processing events.
+    m_VideoContractRejected.store(true);
+    SDL_Event event{};
+    event.type = SDL_EVENT_USER;
+    event.user.code = SDL_CODE_VIDEO_CONTRACT_REJECTED;
+    if (!SDL_PushEvent(&event)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Unable to queue video rejection wakeup: %s", SDL_GetError());
+    }
+}
+
 void Session::updateVideoFecLoss(VideoFecLossPercent loss)
 {
     Session* session = s_ActiveSession;
@@ -388,7 +403,7 @@ bool Session::chooseDecoder(DecoderSelectionMode selectionMode,
 
 #ifdef HAVE_SLVIDEO
     chosenDecoder = new SLVideoDecoder(testOnly);
-    if (chosenDecoder->initialize(&params)) {
+    if (TeraguchiVideo::initializeDecoder(*chosenDecoder, params)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "SLVideo video decoder chosen");
         return true;
@@ -403,7 +418,7 @@ bool Session::chooseDecoder(DecoderSelectionMode selectionMode,
 
 #ifdef HAVE_FFMPEG
     chosenDecoder = new FFmpegVideoDecoder(testOnly);
-    if (chosenDecoder->initialize(&params)) {
+    if (TeraguchiVideo::initializeDecoder(*chosenDecoder, params)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "FFmpeg-based video decoder chosen");
         return true;
@@ -436,6 +451,13 @@ bool Session::isIdentityGbrEnabledForFormat(int videoFormat) const
 
 int Session::drSetup(int videoFormat, int width, int height, int frameRate, void *, int)
 {
+    const auto& expected = s_ActiveSession->m_StreamConfig;
+    if (!TeraguchiVideo::acceptsStream(videoFormat, width, height, frameRate,
+                                       expected.width, expected.height, expected.fps)) {
+        emit s_ActiveSession->displayLaunchError(
+                    tr("The stream does not match the requested Teraguchi video format or dimensions."));
+        return -1;
+    }
     s_ActiveSession->m_ActiveVideoFormat = videoFormat;
     s_ActiveSession->m_ActiveVideoWidth = width;
     s_ActiveSession->m_ActiveVideoHeight = height;
@@ -626,7 +648,11 @@ bool Session::populateDecoderProperties(SDL_Window* window)
         m_VideoCallbacks.submitDecodeUnit = drSubmitDecodeUnit;
     }
 
-    if (m_PlankCaptureSource == StreamingPreferences::PLANK_CAPTURE_SCREENCAPTUREKIT) {
+    if (TeraguchiVideo::Required) {
+        m_StreamConfig.colorSpace = COLORSPACE_IDENTITY_GBR;
+        m_StreamConfig.colorRange = COLOR_RANGE_FULL;
+    }
+    else if (m_PlankCaptureSource == StreamingPreferences::PLANK_CAPTURE_SCREENCAPTUREKIT) {
         // This profile has an exact, negotiated color contract. An environment
         // override must not reinterpret its YCbCr samples as full-range or RGB.
         m_StreamConfig.colorSpace = COLORSPACE_REC_709;
@@ -1487,6 +1513,24 @@ void Session::clearPlankReconnectCredentials()
 
 bool Session::initialize()
 {
+    if (!TeraguchiVideo::acceptsCapture(decoderCaptureSource())) {
+        emit displayLaunchError(tr("Teraguchi requires Native X11/XShm 10-bit capture. "
+                                   "This bookmark uses a different capture source; its settings have not been changed."));
+        return false;
+    }
+    if (TeraguchiVideo::Required && m_PlankVideoProfile !=
+            StreamingPreferences::PLANK_PROFILE_NVENC_HEVC_10BIT_444) {
+        emit displayLaunchError(tr("Teraguchi requires the HEVC 10-bit 4:4:4 NVENC profile. "
+                                   "This bookmark uses a different encoding profile; its settings have not been changed."));
+        return false;
+    }
+    if (TeraguchiVideo::Required &&
+            (qEnvironmentVariableIsSet("COLOR_SPACE_OVERRIDE") ||
+             qEnvironmentVariableIsSet("COLOR_RANGE_OVERRIDE"))) {
+        emit displayLaunchError(tr("Custom color overrides are incompatible with Teraguchi's exact video profile. "
+                                   "Remove them before connecting."));
+        return false;
+    }
 #ifdef Q_OS_DARWIN
     if (qEnvironmentVariableIntValue("I_WANT_BUGGY_FULLSCREEN") == 0) {
         // Using modesetting on modern versions of macOS is extremely unreliable
@@ -1647,7 +1691,15 @@ bool Session::initialize()
         m_SupportedVideoFormats.append(selectedVideoFormat);
     }
 
-    SDL_assert(m_SupportedVideoFormats.size() == 1);
+    // Missing identity support must fail in release builds too, before a
+    // decoder can be probed with an empty or substituted profile.
+    if (!TeraguchiVideo::acceptsFormat(decoderEncoderBackend(), selectedVideoFormat,
+                                       isIdentityGbrEnabledForFormat(selectedVideoFormat))) {
+        emit displayLaunchError(tr("The host cannot provide Teraguchi's exact HEVC 4:4:4 10-bit identity color profile."));
+        SDL_DestroyWindow(testWindow);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        return false;
+    }
 
     // Check for validation errors/warnings and emit
     // signals for them, if appropriate
@@ -1701,10 +1753,8 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         return false;
     }
 
-    // Internal exact-profile decoder selection may legitimately choose
-    // software when no hardware path reproduces the selected profile. That is
-    // an expected capability result, so do not interrupt each connection with
-    // a warning.
+    // The shared decoder boundary enforces the build's policy, including
+    // hardware-only Teraguchi probes. Ordinary PLANK keeps exact software fallback.
     while (!m_SupportedVideoFormats.isEmpty()) {
         const auto availability = getDecoderAvailability(
                     testWindow,
@@ -1721,7 +1771,10 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         }
     }
     if (m_SupportedVideoFormats.isEmpty()) {
-        emit displayLaunchError(tr("This client cannot decode the selected PLANK encoding profile."));
+        emit displayLaunchError(TeraguchiVideo::Required ?
+                    tr("This Mac cannot hardware-decode the required HEVC 4:4:4 10-bit profile. "
+                       "Teraguchi will not fall back to software decoding.") :
+                    tr("This client cannot decode the selected PLANK encoding profile."));
         return false;
     }
 
@@ -3887,6 +3940,11 @@ void Session::execInternal()
     }
     SDL_Event event;
     for (;;) {
+        if (m_VideoContractRejected.load()) {
+            emit displayLaunchError(tr("The stream changed its required hardware or video format. "
+                                       "Teraguchi has stopped the connection."));
+            goto DispatchDeferredCleanup;
+        }
         const Uint64 now = SDL_GetTicks();
         const bool videoSilent = PlankHostRecovery::videoSilent(now, m_LastPlankVideoReceived.load());
         if (workerProbe != nullptr && workerProbe->isFinished()) {
@@ -4082,6 +4140,10 @@ void Session::execInternal()
                 break;
             }
             switch (event.user.code) {
+            case SDL_CODE_VIDEO_CONTRACT_REJECTED:
+                emit displayLaunchError(tr("The stream changed its required hardware or video format. "
+                                           "Teraguchi has stopped the connection."));
+                goto DispatchDeferredCleanup;
             case SDL_CODE_PLANK_RECONNECT:
                 if (reconnectThread != nullptr ||
                         !beginPlankReconnect(reconnectState)) {
@@ -4338,7 +4400,10 @@ void Session::execInternal()
                     SDL_UnlockSpinlock(&m_DecoderLock);
                     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                                  "Failed to recreate decoder after reset");
-                    emit displayLaunchError(tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
+                    emit displayLaunchError(TeraguchiVideo::Required ?
+                                tr("The required hardware video decoder is unavailable. "
+                                   "Teraguchi has stopped the connection instead of switching to software decoding.") :
+                                tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
                     goto DispatchDeferredCleanup;
                 }
 
