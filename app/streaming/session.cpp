@@ -359,6 +359,12 @@ void Session::rejectPenInput()
 }
 
 #ifdef Q_OS_MACOS
+void Session::rejectKeyboardInput(bool permissionFailure)
+{
+    m_KeyboardInputRejected = true;
+    m_KeyboardPermissionFailure = m_KeyboardPermissionFailure || permissionFailure;
+}
+
 void Session::resetMacPenToolbar()
 {
     if (m_ToolbarPenButtons && m_PlankToolbar) m_PlankToolbar->notifyFocusLost();
@@ -4001,6 +4007,12 @@ void Session::execInternal()
     for (;;) {
 #ifdef Q_OS_MACOS
         if (m_PenDisconnectRequested) goto DispatchDeferredCleanup;
+        if (m_KeyboardInputRejected) {
+            emit displayLaunchError(m_KeyboardPermissionFailure ?
+                tr("Keyboard capture is unavailable. Allow Accessibility and Input Monitoring for this client in System Settings, then reconnect.") :
+                tr("Keyboard capture stopped. The connection has closed to release held input. Reconnect after checking Mac input permissions."));
+            goto DispatchDeferredCleanup;
+        }
 #endif
         if (m_PenInputRejected.load()) {
             emit displayLaunchError(tr("The workstation could not accept pen input. "
@@ -4110,6 +4122,7 @@ void Session::execInternal()
                          m_PlankToolbar->eventWaitTimeout() : 1000);
         if (!SDL_WaitEventTimeout(&event, eventWaitTimeout)) {
 #ifdef Q_OS_MACOS
+            if (m_KeyboardInputRejected) continue;
             m_InputHandler->flushPenInput();
 #endif
             if (reconnectThread != nullptr &&
@@ -4124,9 +4137,11 @@ void Session::execInternal()
         }
 
 #ifdef Q_OS_MACOS
+        if (m_KeyboardInputRejected) continue;
         m_InputHandler->beforePenEvent(event);
         if (m_PenInputRejected.load() || m_PenDisconnectRequested) continue;
         if (MacPenInput::isSyntheticMouse(event)) continue;
+        if (m_InputHandler->dispatchMacSystemKey(event)) continue;
 #endif
         const bool reconnectCompletion =
                 event.type == SDL_EVENT_USER &&

@@ -297,9 +297,14 @@ contains(DEFINES, HAVE_LIBINPUT_TABLET) {
     HEADERS += streaming/input/linuxrawwacom.h
 }
 
+HEADERS += streaming/input/keyboardmap.h
+
 macx {
     SOURCES += streaming/input/macpen.cpp streaming/input/pen.cpp
     HEADERS += streaming/input/macpen.h
+    SOURCES += streaming/input/mackeyboard.cpp streaming/input/macsystemkeys.mm
+    HEADERS += streaming/input/mackeyboard.h streaming/input/macsystemkeys.h
+    LIBS += -framework ApplicationServices -framework Carbon
 }
 
 # Platform-specific renderers and decoders

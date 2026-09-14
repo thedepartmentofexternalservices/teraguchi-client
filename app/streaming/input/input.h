@@ -20,6 +20,8 @@ class LinuxRawWacomInput;
 class PlankWaylandCursor;
 #ifdef Q_OS_MACOS
 class MacPenInput;
+class MacKeyboardState;
+class MacSystemKeys;
 #endif
 
 class SdlInputHandler
@@ -46,6 +48,7 @@ public:
     void handlePenEvent(const SDL_Event& event);
     void flushPenInput();
     bool hasPendingPenInput() const;
+    bool dispatchMacSystemKey(const SDL_Event& event);
 #endif
 
     void handleMouseButtonEvent(SDL_MouseButtonEvent* event);
@@ -104,7 +107,11 @@ public:
 private:
 #ifdef Q_OS_MACOS
     void initializeMacPen();
+    void initializeMacKeyboard();
+    SDL_WindowID focusedKeyboardWindow() const;
     std::unique_ptr<MacPenInput> m_MacPenInput;
+    std::unique_ptr<MacKeyboardState> m_MacKeyboard;
+    std::unique_ptr<MacSystemKeys> m_MacSystemKeys;
     bool m_PenToolbarActive = false;
 #endif
     enum KeyCombo {

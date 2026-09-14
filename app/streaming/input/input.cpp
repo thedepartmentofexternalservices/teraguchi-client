@@ -8,6 +8,8 @@
 #include "utils.h"
 #ifdef Q_OS_MACOS
 #include "macpen.h"
+#include "mackeyboard.h"
+#include "macsystemkeys.h"
 #endif
 
 #ifdef HAVE_LIBINPUT_TABLET
@@ -128,7 +130,8 @@ QSize SdlInputHandler::streamDimensions() const
 SdlInputHandler::~SdlInputHandler()
 {
 #ifdef Q_OS_MACOS
-    if (m_MacPenInput) m_MacPenInput->suspend();
+    raiseAllKeys();
+    m_MacSystemKeys.reset();
 #endif
 #ifdef HAVE_LIBINPUT_TABLET
     m_LinuxWacomInput.reset();
@@ -160,6 +163,7 @@ void SdlInputHandler::setWindow(SDL_Window *window)
     m_Window = window;
 #ifdef Q_OS_MACOS
     initializeMacPen();
+    initializeMacKeyboard();
 #endif
     m_LocalCursorSupported =
             (LiGetHostFeatureFlags() & LI_FF_LOCAL_CURSOR) != 0;
@@ -541,6 +545,13 @@ void SdlInputHandler::applyPendingTabletCursorActivation()
 
 void SdlInputHandler::raiseAllKeys()
 {
+#ifdef Q_OS_MACOS
+    // End a modifier-plus-pen gesture before releasing its modifiers.
+    if (m_MacPenInput) m_MacPenInput->suspend();
+    if (m_MacSystemKeys) m_MacSystemKeys->cancel();
+    if (m_MacKeyboard) m_MacKeyboard->releaseAll();
+    return;
+#endif
     if (m_KeysDown.isEmpty()) {
         return;
     }
@@ -578,9 +589,6 @@ void SdlInputHandler::notifyMouseLeave()
 
 void SdlInputHandler::notifyFocusLost()
 {
-#ifdef Q_OS_MACOS
-    if (m_MacPenInput) m_MacPenInput->suspend();
-#endif
     activateCompositorCursor();
 #ifdef HAVE_LIBINPUT_TABLET
     if (m_LinuxWacomInput) {
@@ -713,11 +721,22 @@ void SdlInputHandler::updateKeyboardGrabState()
     // Don't close the window on Alt+F4 when keyboard grab is enabled
     SDL_SetHint(SDL_HINT_WINDOWS_CLOSE_ON_ALT_F4, shouldGrab ? "0" : "1");
 
+#ifdef Q_OS_MACOS
+    if (m_KeyboardCaptureActive != shouldGrab) raiseAllKeys();
+#else
     for (const auto& output : m_PresentationLayout.outputs) {
         SDL_SetWindowKeyboardGrab(output.window, shouldGrab ? true : false);
     }
+#endif
 
     m_KeyboardCaptureActive = shouldGrab;
+#ifdef Q_OS_MACOS
+    // SDL's Cocoa grab uses a private global-hotkey API. The bounded event tap
+    // below supplies reserved chords without changing global hotkey policy.
+    if (shouldGrab && m_MacSystemKeys && !m_MacSystemKeys->start()) {
+        Session::get()->rejectKeyboardInput(true);
+    }
+#endif
 }
 
 bool SdlInputHandler::isSystemKeyCaptureActive()
@@ -756,7 +775,7 @@ bool SdlInputHandler::isSystemKeyCaptureActive()
 void SdlInputHandler::setCaptureActive(bool active)
 {
 #ifdef Q_OS_MACOS
-    if (!active && m_MacPenInput) m_MacPenInput->suspend();
+    if (!active) raiseAllKeys();
 #endif
     if (active) {
         setCursorVisible(m_LocalCursorSupported ?
