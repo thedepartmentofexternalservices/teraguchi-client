@@ -1,3 +1,23 @@
+# Teraguchi Client
+
+This is the client component of [Teraguchi](https://github.com/thedepartmentofexternalservices/teraguchi),
+maintained by The Department of External Services (DXS). It derives from
+[PLANK Client](https://github.com/instinctual/plank-client), part of
+[Alan Latteri's PLANK](https://github.com/instinctual/plank).
+Alan's workstation, video, and transport work provides the foundation.
+PLANK Client in turn preserves the Moonlight client history and licenses below.
+
+Build through the [Teraguchi root repository](https://github.com/thedepartmentofexternalservices/teraguchi)
+so its pinned transport, dependencies, and required FFmpeg patches are included.
+The macOS 26 client is under qualification. There is no production-qualified
+Teraguchi release, and Windows support remains a later decision. DXS owns
+Teraguchi-specific changes and support; no upstream endorsement is implied.
+
+## Inherited Moonlight overview
+
+The following text describes the original Moonlight project. Its downloads,
+features, and support statements are not Teraguchi release claims.
+
 # Moonlight PC
 
 [Moonlight PC](https://moonlight-stream.org) is an open source PC client for NVIDIA GameStream and [Sunshine](https://github.com/LizardByte/Sunshine).
