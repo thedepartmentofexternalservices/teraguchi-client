@@ -156,6 +156,12 @@ public:
     static void postTabletCursorActivationEvent();
 
     void rejectVideoContract();
+    void rejectPenInput();
+#ifdef Q_OS_MACOS
+    bool routeMacPenToToolbar(SDL_PenID pen, SDL_WindowID window, float x, float y,
+                             SDL_PenInputFlags state, Uint64 timestamp);
+    void resetMacPenToolbar();
+#endif
 
     void updateRenderedStats(float fps, float videoMbps)
     {
@@ -396,6 +402,12 @@ private:
     bool m_UnexpectedTermination;
     std::atomic_bool m_ReconnectRequested;
     std::atomic_bool m_VideoContractRejected {false};
+    std::atomic_bool m_PenInputRejected {false};
+#ifdef Q_OS_MACOS
+    SDL_PenID m_ToolbarPen = 0;
+    SDL_PenInputFlags m_ToolbarPenButtons = 0;
+    bool m_PenDisconnectRequested = false;
+#endif
     std::atomic<Uint64> m_DesktopHandoffNoticeDeadline {0};
     std::atomic_bool m_ReconnectGreeterConfirmed {false};
     std::atomic<Uint64> m_LastPlankVideoReceived {0};

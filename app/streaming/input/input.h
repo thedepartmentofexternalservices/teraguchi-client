@@ -18,6 +18,9 @@ class LinuxWacomInput;
 class LinuxRawWacomInput;
 #endif
 class PlankWaylandCursor;
+#ifdef Q_OS_MACOS
+class MacPenInput;
+#endif
 
 class SdlInputHandler
 {
@@ -37,6 +40,13 @@ public:
     void refreshWaylandTabletCursorParents();
 
     void handleKeyEvent(SDL_KeyboardEvent* event);
+
+#ifdef Q_OS_MACOS
+    void beforePenEvent(const SDL_Event& event);
+    void handlePenEvent(const SDL_Event& event);
+    void flushPenInput();
+    bool hasPendingPenInput() const;
+#endif
 
     void handleMouseButtonEvent(SDL_MouseButtonEvent* event);
 
@@ -92,6 +102,11 @@ public:
     void updatePointerRegionLock();
 
 private:
+#ifdef Q_OS_MACOS
+    void initializeMacPen();
+    std::unique_ptr<MacPenInput> m_MacPenInput;
+    bool m_PenToolbarActive = false;
+#endif
     enum KeyCombo {
         KeyComboQuit,
         KeyComboUngrabInput,

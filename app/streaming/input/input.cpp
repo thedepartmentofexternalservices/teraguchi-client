@@ -6,6 +6,9 @@
 #include "streaming/plankwaylandcursor.h"
 #include "streaming/streamutils.h"
 #include "utils.h"
+#ifdef Q_OS_MACOS
+#include "macpen.h"
+#endif
 
 #ifdef HAVE_LIBINPUT_TABLET
 #include "streaming/input/linuxwacom.h"
@@ -104,6 +107,8 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs,
 
 void SdlInputHandler::setStreamDimensions(int streamWidth, int streamHeight)
 {
+    // Launch/reconnect workers can update this atomic snapshot. Pen state is
+    // suspended on the event thread by capture and presentation-layout changes.
     SDL_assert(streamWidth > 0);
     SDL_assert(streamHeight > 0);
     m_StreamDimensions.store(
@@ -122,6 +127,9 @@ QSize SdlInputHandler::streamDimensions() const
 
 SdlInputHandler::~SdlInputHandler()
 {
+#ifdef Q_OS_MACOS
+    if (m_MacPenInput) m_MacPenInput->suspend();
+#endif
 #ifdef HAVE_LIBINPUT_TABLET
     m_LinuxWacomInput.reset();
     m_LinuxRawWacomInput.reset();
@@ -150,6 +158,9 @@ SdlInputHandler::~SdlInputHandler()
 void SdlInputHandler::setWindow(SDL_Window *window)
 {
     m_Window = window;
+#ifdef Q_OS_MACOS
+    initializeMacPen();
+#endif
     m_LocalCursorSupported =
             (LiGetHostFeatureFlags() & LI_FF_LOCAL_CURSOR) != 0;
     if (m_LocalCursorSupported) {
@@ -213,6 +224,9 @@ void SdlInputHandler::setWindow(SDL_Window *window)
 void SdlInputHandler::setPresentationLayout(
         const PlankPresentationLayout& layout)
 {
+#ifdef Q_OS_MACOS
+    if (m_MacPenInput) m_MacPenInput->suspend();
+#endif
     m_PresentationLayout = layout;
     if (m_PresentationLayout.outputs.isEmpty() && m_Window != nullptr) {
         int width = 0;
@@ -564,6 +578,9 @@ void SdlInputHandler::notifyMouseLeave()
 
 void SdlInputHandler::notifyFocusLost()
 {
+#ifdef Q_OS_MACOS
+    if (m_MacPenInput) m_MacPenInput->suspend();
+#endif
     activateCompositorCursor();
 #ifdef HAVE_LIBINPUT_TABLET
     if (m_LinuxWacomInput) {
@@ -658,6 +675,10 @@ bool SdlInputHandler::isCaptureActive()
 
 void SdlInputHandler::setToolbarInteractionActive(bool active)
 {
+#ifdef Q_OS_MACOS
+    m_PenToolbarActive = active;
+    if (active && m_MacPenInput) m_MacPenInput->suspend(false);
+#endif
     if (active) {
         activateCompositorCursor();
     }
@@ -734,6 +755,9 @@ bool SdlInputHandler::isSystemKeyCaptureActive()
 
 void SdlInputHandler::setCaptureActive(bool active)
 {
+#ifdef Q_OS_MACOS
+    if (!active && m_MacPenInput) m_MacPenInput->suspend();
+#endif
     if (active) {
         setCursorVisible(m_LocalCursorSupported ?
                              (!m_MouseWasInVideoRegion || m_RemoteCursorVisible) :

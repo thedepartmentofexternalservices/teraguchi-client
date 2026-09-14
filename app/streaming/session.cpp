@@ -1,5 +1,8 @@
 #include "session.h"
 #include "video/teraguchivideo.h"
+#ifdef Q_OS_MACOS
+#include "input/macpen.h"
+#endif
 #include "streaming/clientframeflowtrace.h"
 #include "backend/hostrecovery.h"
 #include "backend/planknetwork.h"
@@ -347,6 +350,62 @@ void Session::rejectVideoContract()
                     "Unable to queue video rejection wakeup: %s", SDL_GetError());
     }
 }
+
+void Session::rejectPenInput()
+{
+    // The input handler runs on this session's event loop. Check before the
+    // next wait; session teardown releases any pen state left on the host.
+    m_PenInputRejected.store(true);
+}
+
+#ifdef Q_OS_MACOS
+void Session::resetMacPenToolbar()
+{
+    if (m_ToolbarPenButtons && m_PlankToolbar) m_PlankToolbar->notifyFocusLost();
+    m_ToolbarPen = 0;
+    m_ToolbarPenButtons = 0;
+}
+
+bool Session::routeMacPenToToolbar(SDL_PenID pen, SDL_WindowID window, float x, float y,
+                                  SDL_PenInputFlags state, Uint64 timestamp)
+{
+    if (!m_PlankToolbar || window != SDL_GetWindowID(m_Window)) return false;
+    if (pen != m_ToolbarPen) resetMacPenToolbar();
+    m_ToolbarPen = pen;
+    SDL_MouseMotionEvent motion{};
+    motion.type = SDL_EVENT_MOUSE_MOTION;
+    motion.timestamp = timestamp; motion.windowID = window;
+    motion.which = SDL_PEN_MOUSEID; motion.x = x; motion.y = y;
+    m_PlankToolbar->observeMouseMotion(motion);
+    bool consumed = false;
+    const auto previous = m_ToolbarPenButtons;
+    m_ToolbarPenButtons = state & (SDL_PEN_INPUT_DOWN |
+            SDL_PEN_INPUT_BUTTON_1 | SDL_PEN_INPUT_BUTTON_2);
+    const struct { SDL_PenInputFlags flag; Uint8 button; } buttons[] = {
+        {SDL_PEN_INPUT_DOWN, SDL_BUTTON_LEFT},
+        {SDL_PEN_INPUT_BUTTON_1, SDL_BUTTON_RIGHT},
+        {SDL_PEN_INPUT_BUTTON_2, SDL_BUTTON_MIDDLE},
+    };
+    for (const auto& mapping : buttons) {
+        if (!((previous ^ state) & mapping.flag)) continue;
+        SDL_MouseButtonEvent event{};
+        event.down = (state & mapping.flag) != 0;
+        event.type = event.down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+        event.timestamp = timestamp; event.windowID = window;
+        event.which = SDL_PEN_MOUSEID; event.button = mapping.button;
+        event.x = x; event.y = y;
+        const auto action = m_PlankToolbar->handleMouseButton(event);
+        consumed = consumed || action != PlankToolbar::Action::None;
+        if (action == PlankToolbar::Action::Disconnect) m_PenDisconnectRequested = true;
+        else if (action == PlankToolbar::Action::ToggleFullscreen) {
+            toggleFullscreen(); m_PlankToolbar->notifyWindowChanged();
+        } else if (action == PlankToolbar::Action::Minimize) {
+            minimizePresentationWindows();
+        }
+    }
+    return consumed;
+}
+#endif
 
 void Session::updateVideoFecLoss(VideoFecLossPercent loss)
 {
@@ -3940,6 +3999,14 @@ void Session::execInternal()
     }
     SDL_Event event;
     for (;;) {
+#ifdef Q_OS_MACOS
+        if (m_PenDisconnectRequested) goto DispatchDeferredCleanup;
+#endif
+        if (m_PenInputRejected.load()) {
+            emit displayLaunchError(tr("The workstation could not accept pen input. "
+                                       "The connection has stopped to release any held input."));
+            goto DispatchDeferredCleanup;
+        }
         if (m_VideoContractRejected.load()) {
             emit displayLaunchError(tr("The stream changed its required hardware or video format. "
                                        "Teraguchi has stopped the connection."));
@@ -4034,10 +4101,17 @@ void Session::execInternal()
                         m_Preferences->plankUnreachableTimeoutSeconds);
             reconnectDecisionDeadline = 0;
         }
-        const int eventWaitTimeout = m_Reconnecting.load() ? 50 :
+        const int eventWaitTimeout =
+#ifdef Q_OS_MACOS
+                m_InputHandler->hasPendingPenInput() ? 0 :
+#endif
+                m_Reconnecting.load() ? 50 :
                     (m_PlankToolbar ?
                          m_PlankToolbar->eventWaitTimeout() : 1000);
         if (!SDL_WaitEventTimeout(&event, eventWaitTimeout)) {
+#ifdef Q_OS_MACOS
+            m_InputHandler->flushPenInput();
+#endif
             if (reconnectThread != nullptr &&
                     reconnectThread->isFinished() &&
                     !reconnectThread->completionPosted()) {
@@ -4049,6 +4123,11 @@ void Session::execInternal()
             }
         }
 
+#ifdef Q_OS_MACOS
+        m_InputHandler->beforePenEvent(event);
+        if (m_PenInputRejected.load() || m_PenDisconnectRequested) continue;
+        if (MacPenInput::isSyntheticMouse(event)) continue;
+#endif
         const bool reconnectCompletion =
                 event.type == SDL_EVENT_USER &&
                 event.user.code == SDL_CODE_PLANK_REPLANK_COMPLETE;
@@ -4068,6 +4147,20 @@ void Session::execInternal()
             // transport worker retries. Never forward these events to a host
             // whose input connection has already stopped.
             switch (event.type) {
+#ifdef Q_OS_MACOS
+            case SDL_EVENT_PEN_PROXIMITY_IN:
+            case SDL_EVENT_PEN_PROXIMITY_OUT:
+            case SDL_EVENT_PEN_DOWN:
+            case SDL_EVENT_PEN_UP:
+            case SDL_EVENT_PEN_BUTTON_DOWN:
+            case SDL_EVENT_PEN_BUTTON_UP:
+            case SDL_EVENT_PEN_MOTION:
+            case SDL_EVENT_PEN_AXIS:
+                // Capture is disabled throughout reconnect. Keep completed
+                // pen samples available to local controls without forwarding.
+                m_InputHandler->handlePenEvent(event);
+                break;
+#endif
             case SDL_EVENT_MOUSE_MOTION:
                 if (m_PlankToolbar &&
                         event.motion.windowID == SDL_GetWindowID(m_Window)) {
@@ -4481,6 +4574,18 @@ void Session::execInternal()
             SDL_UnlockSpinlock(&m_DecoderLock);
             break;
 
+#ifdef Q_OS_MACOS
+        case SDL_EVENT_PEN_PROXIMITY_IN:
+        case SDL_EVENT_PEN_PROXIMITY_OUT:
+        case SDL_EVENT_PEN_DOWN:
+        case SDL_EVENT_PEN_UP:
+        case SDL_EVENT_PEN_BUTTON_DOWN:
+        case SDL_EVENT_PEN_BUTTON_UP:
+        case SDL_EVENT_PEN_MOTION:
+        case SDL_EVENT_PEN_AXIS:
+            m_InputHandler->handlePenEvent(event);
+            break;
+#endif
         case SDL_EVENT_KEY_UP:
         case SDL_EVENT_KEY_DOWN:
             m_InputHandler->handleKeyEvent(&event.key);
@@ -4522,6 +4627,9 @@ void Session::execInternal()
                 // The ordinary input path batches queued motion for efficient
                 // transport. Aggregate it here when the toolbar is present so
                 // the toolbar tracker and host receive the identical delta.
+                // On Mac, keep mouse/pen/key events in queue order. Searching
+                // ahead for motion can otherwise move a sample across a key.
+#ifndef Q_OS_MACOS
                 if (event.motion.which != SDL_TOUCH_MOUSEID) {
                     SDL_Event nextMotionEvent;
                     while (SDL_PeepEvents(&nextMotionEvent, 1, SDL_GETEVENT,
@@ -4542,6 +4650,7 @@ void Session::execInternal()
                         }
                     }
                 }
+#endif
                 // The single-window toolbar observes the same authoritative
                 // coordinates, but motion always remains remote-desktop input.
                 // Only toolbar button and wheel events have exclusive local

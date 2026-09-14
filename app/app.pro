@@ -297,6 +297,11 @@ contains(DEFINES, HAVE_LIBINPUT_TABLET) {
     HEADERS += streaming/input/linuxrawwacom.h
 }
 
+macx {
+    SOURCES += streaming/input/macpen.cpp streaming/input/pen.cpp
+    HEADERS += streaming/input/macpen.h
+}
+
 # Platform-specific renderers and decoders
 ffmpeg {
     message(FFmpeg decoder selected)

@@ -7,6 +7,9 @@
 
 void SdlInputHandler::handleMouseButtonEvent(SDL_MouseButtonEvent* event)
 {
+#ifdef Q_OS_MACOS
+    if (event->which == SDL_PEN_MOUSEID) return;
+#endif
     int button;
     SDL_Window* window = presentationWindow(event->windowID);
     if (window == nullptr) {
@@ -80,6 +83,10 @@ void SdlInputHandler::handleMouseButtonEvent(SDL_MouseButtonEvent* event)
 void SdlInputHandler::handleMouseMotionEvent(SDL_MouseMotionEvent* event,
                                              bool batchPendingEvents)
 {
+#ifdef Q_OS_MACOS
+    if (event->which == SDL_PEN_MOUSEID) return;
+    batchPendingEvents = false;
+#endif
     if (!isCaptureActive()) {
         // Not capturing
         return;
@@ -192,6 +199,9 @@ bool SdlInputHandler::sendAbsoluteMousePosition(
 
 void SdlInputHandler::handleMouseWheelEvent(SDL_MouseWheelEvent* event)
 {
+#ifdef Q_OS_MACOS
+    if (event->which == SDL_PEN_MOUSEID) return;
+#endif
     if (!isCaptureActive()) {
         // Not capturing
         return;
