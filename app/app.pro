@@ -604,7 +604,11 @@ win32 {
     QMAKE_LFLAGS += /MANIFEST:embed /MANIFESTINPUT:$${PWD}/plank-client.exe.manifest
 }
 macx {
-    QMAKE_MACOSX_DEPLOYMENT_TARGET = 27.0
+    # The root build selects and validates one target for native dependencies,
+    # Cargo, qmake, and the generated app metadata.
+    PLANK_MACOS_CLIENT_TARGET = $$(MACOSX_DEPLOYMENT_TARGET)
+    isEmpty(PLANK_MACOS_CLIENT_TARGET): error("Set MACOSX_DEPLOYMENT_TARGET through the client build entrypoint")
+    QMAKE_MACOSX_DEPLOYMENT_TARGET = $$PLANK_MACOS_CLIENT_TARGET
     QMAKE_APPLE_DEVICE_ARCHS = arm64
     QMAKE_INFO_PLIST = $$PWD/Info.plist
 
