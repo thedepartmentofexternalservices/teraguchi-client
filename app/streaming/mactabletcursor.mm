@@ -78,6 +78,14 @@ bool MacTabletCursor::isAttachedTo(SDL_Window* parentWindow) const
 
 void MacTabletCursor::dispatchPending()
 {
+    SDL_assert(SDL_IsMainThread());
+    NSView* parent = m_Impl->view.superview;
+    // Renderer recreation can append a new opaque Metal view after this
+    // overlay was attached. The parent still matches, but video now covers
+    // the cursor. Restore sibling order without moving or focusing a window.
+    if (parent && parent.subviews.lastObject != m_Impl->view) {
+        [parent addSubview:m_Impl->view positioned:NSWindowAbove relativeTo:nil];
+    }
     // Native layers commit with AppKit's run loop; cursor motion never waits
     // for a decoded frame and does not make a window key or order it front.
 }
