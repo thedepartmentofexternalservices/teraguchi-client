@@ -130,7 +130,7 @@ TailscaleWorkstations::Snapshot TailscaleWorkstations::parseStatus(const QByteAr
 
 TailscaleWorkstations::TailscaleWorkstations(QObject* parent)
     : TailscaleWorkstations(QStringLiteral("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
-                           {QStringLiteral("status"), QStringLiteral("--json")}, parent) {}
+                           {QStringLiteral("status"), QStringLiteral("--json")}, parent) { m_RequireSetup = true; }
 
 TailscaleWorkstations::TailscaleWorkstations(QString executable, QStringList arguments, QObject* parent)
     : QObject(parent), m_Executable(std::move(executable)), m_Arguments(std::move(arguments))
@@ -151,7 +151,7 @@ TailscaleWorkstations::~TailscaleWorkstations() { stopProcess(); }
 bool TailscaleWorkstations::fresh() const
 {
     const auto wallAge = QDateTime::currentMSecsSinceEpoch() - m_SnapshotWallTime;
-    return m_Fresh && m_SnapshotAge.isValid() && m_SnapshotAge.elapsed() < ValidityMs &&
+    return setupPermitsConnection() && m_Fresh && m_SnapshotAge.isValid() && m_SnapshotAge.elapsed() < ValidityMs &&
             wallAge >= 0 && wallAge < ValidityMs;
 }
 
@@ -160,6 +160,33 @@ int TailscaleWorkstations::remainingValidityMs() const
     if (!fresh()) return 0;
     return static_cast<int>(ValidityMs - qMax(m_SnapshotAge.elapsed(),
         QDateTime::currentMSecsSinceEpoch() - m_SnapshotWallTime));
+}
+
+bool TailscaleWorkstations::setupPermitsConnection() const
+{
+    if (!m_RequireSetup) return true; // Explicit native CLI fixture constructor only.
+    const auto permit = studioPermit();
+    return permit && permit->valid() && permit->profile.suffix == m_StudioDnsSuffix;
+}
+
+void TailscaleWorkstations::setStudioSetup(QObject* value)
+{
+    if (m_Setup) disconnect(m_Setup, nullptr, this, nullptr);
+    m_RequireSetup = true;
+    m_Setup = qobject_cast<StudioSetup*>(value);
+    const auto apply = [this] {
+        // A new signed revision invalidates pending login even with the same suffix.
+        stopProcess(); m_Expiry.stop(); m_Fresh = false;
+        m_Workstations.clear(); m_Identity.clear();
+        m_StudioDnsSuffix = m_Setup ? m_Setup->suffix() : QString();
+        m_State = m_StudioDnsSuffix.isEmpty() ? QStringLiteral("configuration-needed") : QStringLiteral("unavailable");
+        emit configurationChanged(); emit stateChanged(); emit catalogInvalidated(); emit identityChanged();
+    };
+    if (m_Setup) {
+        connect(m_Setup, &StudioSetup::configurationChanged, this, apply);
+        connect(m_Setup, &QObject::destroyed, this, apply);
+    }
+    apply();
 }
 
 void TailscaleWorkstations::setStudioDnsSuffix(const QString& suffix)
@@ -202,7 +229,7 @@ void TailscaleWorkstations::refresh(int token)
     stopProcess();
     m_Token = token;
     m_Fresh = false; m_Expiry.stop();
-    if (m_StudioDnsSuffix.isEmpty()) { fail(QStringLiteral("configuration-needed")); return; }
+    if (!setupPermitsConnection() || m_StudioDnsSuffix.isEmpty()) { fail(QStringLiteral("configuration-needed")); return; }
     if (!QFileInfo(m_Executable).isExecutable()) { fail(QStringLiteral("missing")); return; }
     m_Process = new QProcess(this);
     auto* process = m_Process.data();
@@ -243,7 +270,7 @@ void TailscaleWorkstations::finish()
 {
     m_Output += m_Process->readAllStandardOutput();
     const auto snapshot = parseStatus(m_Output, m_StudioDnsSuffix);
-    if (m_RequestAge.elapsed() >= TimeoutMs || !snapshot.valid) {
+    if (!setupPermitsConnection() || m_RequestAge.elapsed() >= TimeoutMs || !snapshot.valid) {
         fail(m_RequestAge.elapsed() >= TimeoutMs ? QStringLiteral("unavailable") : snapshot.state);
         return;
     }

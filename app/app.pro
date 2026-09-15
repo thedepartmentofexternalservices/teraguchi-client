@@ -665,3 +665,7 @@ macx: LIBS += -framework ColorSync
 
 HEADERS += streaming/macpresentationwindows.h
 macx: OBJECTIVE_SOURCES += streaming/macpresentationwindows.mm
+
+HEADERS += backend/teraguchi/studiosetup.h
+SOURCES += backend/teraguchi/studiosetup.cpp
+!include($$PWD/backend/teraguchi/studiotrust.pri): error(Cannot configure studio verification)

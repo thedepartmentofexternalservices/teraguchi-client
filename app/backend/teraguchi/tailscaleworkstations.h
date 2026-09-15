@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDateTime>
+#include "studiosetup.h"
 #include <QElapsedTimer>
 #include <QObject>
 #include <QPointer>
@@ -12,6 +13,7 @@
 class TailscaleWorkstations : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(QObject* studioSetup READ studioSetup WRITE setStudioSetup NOTIFY configurationChanged)
     Q_PROPERTY(QString studioDnsSuffix READ studioDnsSuffix WRITE setStudioDnsSuffix NOTIFY configurationChanged)
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY stateChanged)
@@ -28,6 +30,11 @@ public:
     // Native test seam; never configurable from QML or a status response.
     TailscaleWorkstations(QString executable, QStringList arguments, QObject* parent);
     ~TailscaleWorkstations() override;
+    QObject* studioSetup() const { return m_Setup; }
+    void setStudioSetup(QObject* setup);
+    void setSessionStudioPermit(TeraguchiStudio::Lease permit) { m_RequireSetup = true; m_SessionPermit = std::move(permit); }
+    TeraguchiStudio::Lease studioPermit() const { return m_Setup ? m_Setup->permit() : m_SessionPermit; }
+    bool setupPermitsConnection() const;
     static Snapshot parseStatus(const QByteArray& json, const QString& studioDnsSuffix);
     static QString normalizedSuffix(const QString& suffix);
     QString studioDnsSuffix() const { return m_StudioDnsSuffix; }
@@ -54,6 +61,9 @@ private:
     void stopProcess();
     void fail(const QString& state);
     void finish();
+    TeraguchiStudio::Lease m_SessionPermit;
+    QPointer<StudioSetup> m_Setup;
+    bool m_RequireSetup = false;
     QString m_Executable;
     QStringList m_Arguments;
     QString m_StudioDnsSuffix;

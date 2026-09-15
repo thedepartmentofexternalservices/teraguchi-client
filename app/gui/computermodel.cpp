@@ -394,7 +394,8 @@ QString ComputerModel::authenticateAssignedTarget(TailscaleWorkstations* assignm
                                                QString username, QString password)
 {
     const auto displayToken = expected.value(QStringLiteral("displayToken")).toString();
-    if (!assignedInputPermissionsReady() || !assignedDisplaysCurrent(displayToken)) {
+    if (!assignments || !assignments->studioPermit() || !assignments->studioPermit()->valid() ||
+            !assignedInputPermissionsReady() || !assignedDisplaysCurrent(displayToken)) {
         password.fill(QChar(0)); return {};
     }
     const auto current = assignedLoginTarget(assignments, expected.value(QStringLiteral("id")).toString());
@@ -411,6 +412,7 @@ QString ComputerModel::authenticateAssignedTarget(TailscaleWorkstations* assignm
             // Use PLANK's existing TLS/PAM path with an explicit endpoint/identity.
             const auto requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_AuthenticationDisplays.insert(requestId, displayToken);
+            m_AuthenticationSetup.insert(requestId, assignments->studioPermit());
             m_ComputerManager->authenticateHost(computer, std::move(username), std::move(password),
                                                  address, current.value(QStringLiteral("hostId")).toString(), requestId);
             return requestId;
@@ -472,10 +474,13 @@ Session* ComputerModel::createAssignedSession(TailscaleWorkstations* assignments
     return nullptr;
 #else
     const auto displayToken = expected.value(QStringLiteral("displayToken")).toString();
-    if (!assignedInputPermissionsReady() || !assignedDisplayError(displays).isEmpty() ||
+    if (!assignments || !assignments->studioPermit() || !assignments->studioPermit()->valid() ||
+            m_AuthenticationSetup.value(requestId) != assignments->studioPermit() ||
+            !assignedInputPermissionsReady() || !assignedDisplayError(displays).isEmpty() ||
             !assignedDisplaysCurrent(displayToken) || m_AssignedDisplays.outputs.size() != displays ||
             m_AuthenticationDisplays.value(requestId) != displayToken) return nullptr;
     m_AuthenticationDisplays.remove(requestId);
+    m_AuthenticationSetup.remove(requestId);
     const auto current = assignedLoginTarget(assignments, expected.value(QStringLiteral("id")).toString());
     if (!TeraguchiAssignment::matches(expected, current)) return nullptr;
     QString username, password;
@@ -490,7 +495,7 @@ Session* ComputerModel::createAssignedSession(TailscaleWorkstations* assignments
     for (auto& app : computer->appList) {
         if (app.name == QStringLiteral("Desktop")) {
             auto* session = new Session(computer.get(), app);
-            session->bindAssignedTarget(assignments, current, displays);
+            session->bindAssignedTarget(assignments, current, displays, assignments->studioPermit());
             session->bindAssignedDisplays(m_AssignedDisplays);
             session->setAssignedCredentials(std::move(username), std::move(password));
             return session;
@@ -504,5 +509,6 @@ Session* ComputerModel::createAssignedSession(TailscaleWorkstations* assignments
 void ComputerModel::cancelAssignedAuthentication(const QString& requestId)
 {
     m_AuthenticationDisplays.remove(requestId);
+    m_AuthenticationSetup.remove(requestId);
     if (m_ComputerManager) m_ComputerManager->cancelAssignedAuthentication(requestId);
 }

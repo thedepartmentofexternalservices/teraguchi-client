@@ -12,7 +12,7 @@ class AssignmentWatch : public QThread
     Q_OBJECT
 public:
     AssignmentWatch(QString suffix, QVariantMap target, int validityMs,
-                    QString executable = {}, QStringList arguments = {});
+                    QString executable = {}, QStringList arguments = {}, TeraguchiStudio::Lease permit = {});
     ~AssignmentWatch() override;
     bool permitsConnection() const;
     static bool sameAssignment(const QVariantMap& expected, const QString& identity,
@@ -23,6 +23,7 @@ protected:
     void run() override;
 private:
     static qint64 now();
+    TeraguchiStudio::Lease m_StudioPermit;
     QString m_Suffix;
     QString m_Executable;
     QStringList m_Arguments;

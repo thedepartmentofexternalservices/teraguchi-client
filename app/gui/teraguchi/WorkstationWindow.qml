@@ -1,6 +1,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Dialogs
 import ComputerManager 1.0
 import ComputerModel 1.0
 import TailscaleWorkstations 1.0
@@ -17,7 +18,7 @@ ApplicationWindow {
     property bool quitting: false
     property bool polling: false
     function updatePolling() {
-        var needed = visible && !sessionRuntime.executing && !quitting;
+        var needed = visible && studioSetupService.ready && !sessionRuntime.executing && !quitting;
         if (needed === polling) return;
         polling = needed;
         if (polling) ComputerManager.startPolling();
@@ -54,8 +55,27 @@ ApplicationWindow {
         updatePolling();
         workstationFlow.refresh();
     }
+    Connections {
+        target: studioSetupService
+        function onStatusChanged() { window.updatePolling(); }
+        function onConfigurationChanged() {
+            if (workstationFlow.busy) workstationFlow.cancel();
+            if (workstationFlow.sessionOpen) workstationFlow.disconnect();
+            loginBridge.cancel();
+            if (!sessionRuntime.pending) workstationFlow.refresh();
+        }
+    }
+    FileDialog {
+        id: studioFileDialog
+        title: qsTr("Import studio setup")
+        nameFilters: [qsTr("Teraguchi studio setup (*.teraguchi-studio)")]
+        onAccepted: {
+            if (!workstationFlow.busy && !sessionRuntime.pending)
+                studioSetupService.importFile(selectedFile);
+        }
+    }
     WorkstationFlow { id: workstationFlow }
-    TailscaleWorkstations { id: tailscaleProvider; studioDnsSuffix: studioDnsSuffixConfiguration }
+    TailscaleWorkstations { id: tailscaleProvider; studioSetup: studioSetupService }
     TailscaleAssignments { id: assignmentBridge; flow: workstationFlow; provider: tailscaleProvider }
     ComputerModel { id: computerCatalog }
     MacInputPermissions { id: inputPermissions }
@@ -95,14 +115,21 @@ ApplicationWindow {
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
+        StudioSetupPanel {
+            Layout.fillWidth: true
+            Layout.margins: 12
+            setup: studioSetupService
+            busy: workstationFlow.busy || sessionRuntime.pending
+            onImportRequested: studioFileDialog.open()
+        }
         Label {
             Layout.fillWidth: true
             Layout.margins: 12
-            visible: ["ready", "refreshing"].indexOf(tailscaleProvider.state) < 0
+            visible: studioSetupService.ready && ["ready", "refreshing"].indexOf(tailscaleProvider.state) < 0
             wrapMode: Text.Wrap
             text: {
                 switch (tailscaleProvider.state) {
-                case "configuration-needed": return qsTr("Studio setup is needed. Ask your administrator for the configured client launcher.");
+                case "configuration-needed": return qsTr("Import a current studio setup file, then refresh.");
                 case "missing": return qsTr("Install Tailscale, then accept your studio's workstation invitation.");
                 case "needs-login": return qsTr("Sign in to Tailscale with the account that accepted your workstation invitation.");
                 case "needs-approval": return qsTr("Your Tailscale device is waiting for approval.");

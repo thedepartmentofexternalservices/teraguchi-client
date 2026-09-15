@@ -102,6 +102,7 @@ private:
     MacDisplayBinding::Selection m_AssignedDisplays;
     QString m_DisplayToken;
     QHash<QString, QString> m_AuthenticationDisplays;
+    QHash<QString, TeraguchiStudio::Lease> m_AuthenticationSetup;
     QVector<NvComputer*> m_Computers;
     ComputerManager* m_ComputerManager = nullptr;
 };

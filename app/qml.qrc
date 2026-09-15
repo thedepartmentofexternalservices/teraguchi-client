@@ -27,6 +27,7 @@
         <file>gui/teraguchi/AssignedLoginDialog.qml</file>
         <file>gui/teraguchi/WorkstationSession.qml</file>
         <file>gui/teraguchi/WorkstationWindow.qml</file>
+    <file>gui/teraguchi/StudioSetupPanel.qml</file>
         <file>gui/teraguchi/MacPermissionsGate.qml</file>
         <file>gui/teraguchi/MacPermissionsDialog.qml</file>
         <file>gui/teraguchi/MacPermissionsPanel.qml</file>

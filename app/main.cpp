@@ -958,11 +958,19 @@ int main(int argc, char *argv[])
         qputenv("QT_QUICK_CONTROLS_MATERIAL_PRIMARY", "#393D43");
     }
 
+    auto* studioSetup = workstationMode ? new StudioSetup(&app) : nullptr;
+    if (studioSetup) {
+        if (!parser.studioDnsSuffix().isEmpty()) studioSetup->setDevelopmentSuffix(parser.studioDnsSuffix());
+        if (!parser.studioConfigPath().isEmpty() && !studioSetup->importFile(QUrl::fromLocalFile(parser.studioConfigPath()))) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Studio setup import failed; no workstation connection started");
+            return EXIT_FAILURE;
+        }
+    }
     QQmlApplicationEngine engine;
     QString initialView;
     switch (commandLineParserResult) {
     case GlobalCommandLineParser::WorkstationsRequested:
-        engine.rootContext()->setContextProperty("studioDnsSuffixConfiguration", parser.studioDnsSuffix());
+        engine.rootContext()->setContextProperty("studioSetupService", studioSetup);
         break;
     case GlobalCommandLineParser::NormalStartRequested:
         initialView = "qrc:/gui/PcView.qml";

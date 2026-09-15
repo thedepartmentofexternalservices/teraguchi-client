@@ -839,8 +839,9 @@ Session::Session(NvComputer* computer, NvApp& app,
     }
 }
 
-void Session::bindAssignedTarget(TailscaleWorkstations* provider, const QVariantMap& target, int displays)
+void Session::bindAssignedTarget(TailscaleWorkstations* provider, const QVariantMap& target, int displays, TeraguchiStudio::Lease permit)
 {
+    m_StudioPermit = std::move(permit);
     // Keep all route, topology and reconnect reads session-local.
     m_AssignedComputer = std::make_unique<NvComputer>(*m_Computer);
     m_Computer = m_AssignedComputer.get();
@@ -848,7 +849,7 @@ void Session::bindAssignedTarget(TailscaleWorkstations* provider, const QVariant
     m_Computer->plankHostLayout = NvOutputTopology::MatchClientHostLayout;
     m_AssignedDisplayCount = displays;
     m_AllowActiveSessionTakeover = false;
-    m_AssignmentWatch = std::make_unique<AssignmentWatch>(provider->studioDnsSuffix(), target, provider->remainingValidityMs());
+    m_AssignmentWatch = std::make_unique<AssignmentWatch>(provider->studioDnsSuffix(), target, provider->remainingValidityMs(), QString(), QStringList(), m_StudioPermit);
     connect(m_AssignmentWatch.get(), &AssignmentWatch::assignmentRemoved, this, [this] {
         requestDisconnect();
         emit displayLaunchError(tr("Your workstation assignment changed. Refresh the list before connecting again."));
@@ -858,6 +859,8 @@ void Session::bindAssignedTarget(TailscaleWorkstations* provider, const QVariant
 void Session::validateAssignedEndpoint()
 {
     if (!m_AssignmentWatch) return;
+    if (!m_StudioPermit || !m_StudioPermit->valid())
+        throw GfeHttpResponseException(401, "Studio setup expired; import a current setup file");
     if (!MacDisplayBinding::current(m_AssignedDisplays))
         throw GfeHttpResponseException(401, "Selected displays changed; start a new connection");
     if (!MacInputAccess::query().ready())
@@ -1634,6 +1637,10 @@ void Session::clearPlankReconnectCredentials()
 
 bool Session::initialize()
 {
+    if (m_AssignedDisplayCount && (!m_StudioPermit || !m_StudioPermit->valid())) {
+        emit displayLaunchError(tr("Studio setup has expired. Import a current setup file, then connect again."));
+        return false;
+    }
     if (m_AssignedDisplayCount && !MacInputAccess::query().ready()) {
         emit displayLaunchError(tr("Allow Accessibility and Input Monitoring for this client, then connect again."));
         return false;
@@ -4220,6 +4227,11 @@ void Session::execInternal()
         const Uint64 now = SDL_GetTicks();
         if (m_AssignedDisplayCount && now >= nextPermissionCheck) {
             nextPermissionCheck = now + 2000;
+            if (!m_StudioPermit || !m_StudioPermit->valid()) {
+                requestDisconnect();
+                emit displayLaunchError(tr("Studio setup has expired. The session has closed to release held input. Import a current setup file, then reconnect."));
+                goto DispatchDeferredCleanup;
+            }
             if (!MacDisplayBinding::current(m_AssignedDisplays)) {
                 requestDisconnect();
                 emit displayLaunchError(tr("The selected displays changed. The session has closed to release held input. Check your displays, then reconnect."));

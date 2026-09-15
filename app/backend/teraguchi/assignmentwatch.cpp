@@ -3,8 +3,8 @@
 #include <memory>
 
 AssignmentWatch::AssignmentWatch(QString suffix, QVariantMap target, int validityMs,
-                                 QString executable, QStringList arguments)
-    : m_Suffix(std::move(suffix)), m_Executable(std::move(executable)),
+                                 QString executable, QStringList arguments, TeraguchiStudio::Lease permit)
+    : m_StudioPermit(std::move(permit)), m_Suffix(std::move(suffix)), m_Executable(std::move(executable)),
       m_Arguments(std::move(arguments)), m_Target(std::move(target))
 {
     m_ExpiresAt.store(now() + qBound(0, validityMs, 30000));
@@ -15,7 +15,7 @@ qint64 AssignmentWatch::now()
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
-bool AssignmentWatch::permitsConnection() const { return now() < m_ExpiresAt.load(); }
+bool AssignmentWatch::permitsConnection() const { return (!m_StudioPermit || m_StudioPermit->valid()) && now() < m_ExpiresAt.load(); }
 bool AssignmentWatch::sameAssignment(const QVariantMap& expected, const QString& identity,
                                     const QVariantList& entries)
 {
@@ -33,6 +33,7 @@ void AssignmentWatch::run()
     auto ownedReader = m_Executable.isEmpty() ? std::make_unique<TailscaleWorkstations>() :
         std::make_unique<TailscaleWorkstations>(m_Executable, m_Arguments, nullptr);
     auto& reader = *ownedReader;
+    if (m_StudioPermit) reader.setSessionStudioPermit(m_StudioPermit);
     reader.setStudioDnsSuffix(m_Suffix);
     QTimer refresh;
     refresh.setInterval(10000);

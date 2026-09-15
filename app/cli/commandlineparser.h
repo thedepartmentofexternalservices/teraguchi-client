@@ -18,9 +18,11 @@ public:
     virtual ~GlobalCommandLineParser();
 
     ParseResult parse(const QStringList &args);
+    QString studioConfigPath() const { return m_StudioConfigPath; }
     QString studioDnsSuffix() const { return m_StudioDnsSuffix; }
 private:
     QString m_StudioDnsSuffix;
+    QString m_StudioConfigPath;
 
 };
 
