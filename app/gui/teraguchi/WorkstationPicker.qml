@@ -6,6 +6,7 @@ import QtQuick.Layouts 1.15
 Rectangle {
     id: page
     required property WorkstationFlow flow
+    signal helpRequested()
     property bool detailsOpen: false
     property bool powerDetailsOpen: false
     property string searchText: ""
@@ -161,6 +162,13 @@ Rectangle {
                 }
                 Item {
                     Layout.fillWidth: true
+                }
+                TeraguchiButton {
+                    objectName: "supportButton"
+                    text: qsTr("Help…")
+                    enabled: !flow.busy && !flow.runtimePending && !flow.sessionOpen
+                    onClicked: page.helpRequested()
+                    Accessible.description: qsTr("Display and tablet help, access repair and private support report")
                 }
                 TeraguchiButton {
                     objectName: "refreshButton"

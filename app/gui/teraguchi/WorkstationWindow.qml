@@ -6,6 +6,7 @@ import ComputerManager 1.0
 import ComputerModel 1.0
 import TailscaleWorkstations 1.0
 import MacInputPermissions 1.0
+import SupportDiagnostics 1.0
 
 ApplicationWindow {
     id: window
@@ -79,6 +80,7 @@ ApplicationWindow {
     TailscaleAssignments { id: assignmentBridge; flow: workstationFlow; provider: tailscaleProvider }
     ComputerModel { id: computerCatalog }
     MacInputPermissions { id: inputPermissions }
+    SupportDiagnostics { id: supportDiagnostics }
     MacPermissionsGate { id: permissionGate; flow: workstationFlow; provider: inputPermissions }
     Timer {
         interval: 2000
@@ -146,7 +148,10 @@ ApplicationWindow {
             permissions: inputPermissions
             onReviewRequested: permissionDialog.open()
         }
-        WorkstationPicker { Layout.fillWidth: true; Layout.fillHeight: true; flow: workstationFlow }
+        WorkstationPicker {
+            Layout.fillWidth: true; Layout.fillHeight: true; flow: workstationFlow
+            onHelpRequested: supportDialog.open()
+        }
         Label {
             Layout.margins: 12
             Layout.fillWidth: true
@@ -155,5 +160,14 @@ ApplicationWindow {
         }
     }
     MacPermissionsDialog { id: permissionDialog; permissions: inputPermissions }
+    SupportDialog {
+        id: supportDialog
+        flow: workstationFlow
+        diagnostics: supportDiagnostics
+        permissions: inputPermissions
+        studioState: studioSetupService.state
+        tailscaleState: tailscaleProvider.state
+        onReviewPermissionsRequested: permissionDialog.open()
+    }
     AssignedLoginDialog { flow: workstationFlow; login: loginBridge }
 }

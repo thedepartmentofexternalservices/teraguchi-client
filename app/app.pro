@@ -6,6 +6,8 @@ contains(CONFIG, teraguchi-strict-video) {
     DEFINES += TERAGUCHI_STRICT_VIDEO
 }
 HEADERS += backend/teraguchi/hosttrust.h
+HEADERS += backend/teraguchi/supportdiagnostics.h
+SOURCES += backend/teraguchi/supportdiagnostics.cpp
 HEADERS += streaming/video/decoderpolicy.h \
     streaming/video/teraguchivideo.h streaming/video/teraguchiframe.h
 

@@ -65,7 +65,7 @@ QtObject {
                 runtime.flow.retainsSession = false;
                 runtime.flow.resumeAttempt = false;
                 if (runtime.failure && !runtime.stopped)
-                    runtime.flow.block(qsTr("Couldn't open the workstation"), runtime.failure);
+                    runtime.flow.block(qsTr("Couldn't open the workstation"), runtime.failure, "connection");
                 else
                     runtime.flow.phase = "idle";
             }

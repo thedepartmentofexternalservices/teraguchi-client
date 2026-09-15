@@ -33,7 +33,7 @@ QtObject {
         if (!assignments.resolveLoginTarget(token, preparingNodeId)) { assignments.flow.invalidateCatalog(); cancel(); return; }
         var resolved = computers.assignedLoginTarget(assignments.provider, preparingNodeId);
         if (resolved && resolved.trustError) {
-            assignments.flow.block(qsTr("Workstation verification needed"), resolved.trustError);
+            assignments.flow.block(qsTr("Workstation verification needed"), resolved.trustError, "trust");
             cancel(); return;
         }
         if (!resolved || !resolved.computerId || !resolved.hostId) return;
@@ -49,7 +49,7 @@ QtObject {
 
     function displaysReady() {
         if (computers.assignedDisplaysCurrent(displayToken)) return true;
-        assignments.flow.block(qsTr("Selected displays unavailable"), qsTr("Your selected displays changed. Check their arrangement and start a new connection."));
+        assignments.flow.block(qsTr("Selected displays unavailable"), qsTr("Your selected displays changed. Check their arrangement and start a new connection."), "displays");
         cancel();
         return false;
     }
@@ -86,7 +86,7 @@ QtObject {
             login.cancel();
             var selection = login.computers.prepareAssignedDisplays(displays, login.presentationWindow);
             if (!selection.token) {
-                login.assignments.flow.block(qsTr("Selected displays unavailable"), selection.error);
+                login.assignments.flow.block(qsTr("Selected displays unavailable"), selection.error, "displays");
                 return;
             }
             login.displayToken = selection.token;

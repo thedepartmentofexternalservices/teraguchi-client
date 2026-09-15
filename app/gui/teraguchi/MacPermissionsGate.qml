@@ -15,7 +15,7 @@ QtObject {
             if (gate.flow.busy) gate.flow.cancel();
             if (gate.flow.sessionOpen) gate.flow.disconnect();
             gate.flow.block(qsTr("Mac permissions needed"),
-                qsTr("Enable Accessibility and Input Monitoring for this client, then connect again."));
+                qsTr("Enable Accessibility and Input Monitoring for this client, then connect again."), "permissions");
         }
     }
 }

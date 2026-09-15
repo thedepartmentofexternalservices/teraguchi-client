@@ -30,6 +30,7 @@
     <file>gui/teraguchi/StudioSetupPanel.qml</file>
         <file>gui/teraguchi/MacPermissionsGate.qml</file>
         <file>gui/teraguchi/MacPermissionsDialog.qml</file>
+        <file>gui/teraguchi/SupportDialog.qml</file>
         <file>gui/teraguchi/MacPermissionsPanel.qml</file>
         <file>gui/teraguchi/TeraguchiButton.qml</file>
         <file>gui/teraguchi/TeraguchiComputerIcon.qml</file>

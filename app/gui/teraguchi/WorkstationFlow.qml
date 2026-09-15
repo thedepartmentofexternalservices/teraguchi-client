@@ -10,6 +10,7 @@ QtObject {
     property string phase: "idle"
     property string problem: ""
     property string problemTitle: ""
+    property string supportCode: "none"
     property int generation: 0
     property string attemptId: ""
     property int attemptDisplays: 0
@@ -163,13 +164,13 @@ QtObject {
             resumeAttempt = false;
             retainsSession = false;
             selectedId = "";
-            block(qsTr("Workstation no longer assigned"), qsTr("Ask your studio administrator to check your workstation assignment."));
+            block(qsTr("Workstation no longer assigned"), qsTr("Ask your studio administrator to check your workstation assignment."), "assignment");
             if (wasBusy)
                 cancelRequested(oldToken);
             if (hadSession)
                 disconnectRequested(oldId);
         } else if (unavailable) {
-            block(qsTr("Availability changed"), qsTr("Check the workstation status before trying again."));
+            block(qsTr("Availability changed"), qsTr("Check the workstation status before trying again."), "workstation");
             cancelRequested(oldToken);
         }
         if (wasRefreshing)
@@ -186,6 +187,7 @@ QtObject {
         resumeAttempt = false;
         problem = "";
         problemTitle = "";
+        supportCode = "none";
         return true;
     }
 
@@ -197,10 +199,11 @@ QtObject {
         return true;
     }
 
-    function block(title, detail) {
+    function block(title, detail, code) {
         phase = "blocked";
         problemTitle = title;
         problem = detail;
+        supportCode = ["assignment", "permissions", "displays", "tablet", "trust", "seat", "workstation", "login", "video", "connection"].indexOf(code) >= 0 ? code : "unknown";
     }
 
     function begin(resume) {
@@ -216,6 +219,7 @@ QtObject {
         attemptDisplays = displayCount;
         problem = "";
         problemTitle = "";
+        supportCode = "none";
         phase = "checking";
         ++generation;
         checkRequested(generation, attemptId, attemptDisplays, resumeAttempt);
@@ -238,28 +242,28 @@ QtObject {
         if (!result || result.outcome !== "pass") {
             var reason = result ? result.outcome : "unknown";
             if (reason === "occupied")
-                block(qsTr("Workstation is in use"), qsTr("Another artist is connected. Try again when the workstation is available."));
+                block(qsTr("Workstation is in use"), qsTr("Another artist is connected. Try again when the workstation is available."), "seat");
             else if (reason === "permissions")
-                block(qsTr("Mac permissions needed"), qsTr("Enable Accessibility and Input Monitoring for the client, then check again."));
+                block(qsTr("Mac permissions needed"), qsTr("Enable Accessibility and Input Monitoring for the client, then check again."), "permissions");
             else if (reason === "host-not-ready")
-                block(qsTr("Workstation needs checking"), qsTr("The shared machine did not confirm a compatible workstation. Contact your studio administrator."));
+                block(qsTr("Workstation needs checking"), qsTr("The shared machine did not confirm a compatible workstation. Contact your studio administrator."), "workstation");
             else if (reason === "offline")
-                block(qsTr("Workstation is offline"), qsTr("Check your network connection. If it stays offline, contact your studio administrator."));
+                block(qsTr("Workstation is offline"), qsTr("Check your network connection. If it stays offline, contact your studio administrator."), "workstation");
             else
-                block(qsTr("Connection check failed"), qsTr("The workstation could not confirm a compatible session. Check again or contact your studio administrator."));
+                block(qsTr("Connection check failed"), qsTr("The workstation could not confirm a compatible session. Check again or contact your studio administrator."), "connection");
             return false;
         }
         // These are adapter attestations, not facts inferred from a bookmark.
         if (result.authorized !== true || result.seatAvailable !== true) {
-            block(qsTr("Access could not be confirmed"), qsTr("Sign in through the workstation's trusted login flow, then check again."));
+            block(qsTr("Access could not be confirmed"), qsTr("Sign in through the workstation's trusted login flow, then check again."), "login");
             return false;
         }
         if (result.displays !== attemptDisplays) {
-            block(qsTr("Selected displays unavailable"), qsTr("The session cannot provide every selected display. Reconnect the missing display or explicitly choose a different layout."));
+            block(qsTr("Selected displays unavailable"), qsTr("The session cannot provide every selected display. Reconnect the missing display or explicitly choose a different layout."), "displays");
             return false;
         }
         if (result.nativeSourceDepth !== 10 || result.profile !== "hevc-rext-444-10" || result.hardwareDecode !== true) {
-            block(qsTr("Picture requirements not met"), qsTr("This session needs native 10-bit capture, HEVC 4:4:4 10-bit, and hardware decoding. Ask your studio administrator to check compatibility."));
+            block(qsTr("Picture requirements not met"), qsTr("This session needs native 10-bit capture, HEVC 4:4:4 10-bit, and hardware decoding. Ask your studio administrator to check compatibility."), "video");
             return false;
         }
         phase = "connecting";
@@ -289,7 +293,7 @@ QtObject {
         if (!catalogIsCurrent() || token !== generation || phase !== "connecting")
             return false;
         if (success !== true) {
-            block(qsTr("Couldn't open the workstation"), qsTr("The session did not start. Check again; your selected display layout is unchanged."));
+            block(qsTr("Couldn't open the workstation"), qsTr("The session did not start. Check again; your selected display layout is unchanged."), "connection");
             return false;
         }
         retainsSession = true;
@@ -315,6 +319,7 @@ QtObject {
         resumeAttempt = false;
         problem = "";
         problemTitle = "";
+        supportCode = "none";
         retainsSession = false;
         if (wasBusy)
             cancelRequested(oldToken);
