@@ -476,7 +476,8 @@ macx {
         streaming/video/ffmpeg-renderers/vt_metal.mm
 
     HEADERS += \
-        streaming/video/ffmpeg-renderers/vt.h
+        streaming/video/ffmpeg-renderers/vt.h \
+        streaming/video/ffmpeg-renderers/vt_presentation.h
 }
 embedded {
     message(Embedded build)
