@@ -7,6 +7,12 @@ Rectangle {
     id: page
     required property WorkstationFlow flow
     signal helpRequested()
+    signal settingsRequested()
+    signal noticeRequested()
+    property string studioLabel: ""
+    property bool settingsAvailable: false
+    property string noticeText: ""
+    property string noticeAction: ""
     property bool detailsOpen: false
     property bool powerDetailsOpen: false
     property string searchText: ""
@@ -156,12 +162,23 @@ Rectangle {
                     color: theme.text
                 }
                 Label {
-                    text: qsTr("Workstations")
+                    objectName: "studioHeaderLabel"
+                    text: page.studioLabel || qsTr("Workstations")
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    Layout.maximumWidth: page.compact ? 160 : 300
                     font.pixelSize: 13
                     color: theme.muted
                 }
                 Item {
                     Layout.fillWidth: true
+                }
+                TeraguchiButton {
+                    objectName: "settingsButton"
+                    text: qsTr("Settings…")
+                    visible: page.settingsAvailable
+                    enabled: !flow.busy && !flow.runtimePending && !flow.sessionOpen
+                    onClicked: page.settingsRequested()
                 }
                 TeraguchiButton {
                     objectName: "supportButton"
@@ -187,6 +204,34 @@ Rectangle {
                 width: parent.width
                 height: 1
                 color: theme.stroke
+            }
+        }
+        Rectangle {
+            objectName: "setupNotice"
+            visible: page.noticeText.length > 0
+            Layout.fillWidth: true
+            implicitHeight: noticeRow.implicitHeight + 24
+            color: theme.panel
+            RowLayout {
+                id: noticeRow
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 16
+                Label {
+                    objectName: "setupNoticeText"
+                    Layout.fillWidth: true
+                    text: page.noticeText
+                    textFormat: Text.PlainText
+                    color: theme.text
+                    wrapMode: Text.Wrap
+                }
+                TeraguchiButton {
+                    objectName: "setupNoticeAction"
+                    text: page.noticeAction
+                    visible: text.length > 0
+                    enabled: !flow.busy && !flow.runtimePending && !flow.sessionOpen
+                    onClicked: page.noticeRequested()
+                }
             }
         }
         RowLayout {

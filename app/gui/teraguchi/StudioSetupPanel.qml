@@ -7,7 +7,9 @@ Frame {
     required property QtObject setup
     property bool busy: false
     signal importRequested()
+    implicitHeight: setupContent.implicitHeight + topPadding + bottomPadding
     RowLayout {
+        id: setupContent
         anchors.fill: parent
         ColumnLayout {
             Layout.fillWidth: true
@@ -24,7 +26,7 @@ Frame {
                 wrapMode: Text.Wrap
                 textFormat: Text.PlainText
                 text: !panel.setup ? "" : panel.setup.message || (panel.setup.state === "development" ? qsTr("Using the development launcher’s studio setup.") :
-                    panel.setup.ready ? qsTr("Verified studio setup. Accept your workstation invitation in Tailscale, then refresh.") :
+                    panel.setup.ready ? qsTr("Studio connection settings are verified.") :
                     panel.setup.canImport ? qsTr("Import the studio setup file provided by your administrator.") :
                     qsTr("Ask your administrator for the configured client and studio setup file."))
             }

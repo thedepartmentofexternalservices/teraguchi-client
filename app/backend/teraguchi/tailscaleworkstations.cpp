@@ -269,10 +269,20 @@ void TailscaleWorkstations::fail(const QString& state)
 void TailscaleWorkstations::finish()
 {
     m_Output += m_Process->readAllStandardOutput();
-    const auto snapshot = parseStatus(m_Output, m_StudioDnsSuffix);
+    auto snapshot = parseStatus(m_Output, m_StudioDnsSuffix);
     if (!setupPermitsConnection() || m_RequestAge.elapsed() >= TimeoutMs || !snapshot.valid) {
         fail(m_RequestAge.elapsed() >= TimeoutMs ? QStringLiteral("unavailable") : snapshot.state);
         return;
+    }
+    const auto permit = studioPermit();
+    if (permit && !permit->development) {
+        // Tailscale supplies reachability; signed studio setup identifies the
+        // supported hosts. Never add a catalog host absent from the peer view.
+        auto& entries = snapshot.workstations;
+        entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const QVariant& value) {
+            return !permit->profile.workstations.contains(value.toMap().value("id").toString());
+        }), entries.end());
+        snapshot.state = entries.isEmpty() ? QStringLiteral("no-shared-workstations") : QStringLiteral("ready");
     }
     const int token = m_Token;
     const bool changedIdentity = !m_Identity.isEmpty() && snapshot.identity != m_Identity;

@@ -4,6 +4,8 @@
 #endif
 #include "tailscaleworkstations.h"
 #include <QCryptographicHash>
+#include <QCoreApplication>
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -19,6 +21,13 @@
 namespace {
 constexpr qint64 MaxBytes = 8192;
 const QByteArray Domain("Teraguchi studio setup v1\n");
+QString bundledSetupPath() {
+#ifdef Q_OS_MACOS
+    return QCoreApplication::applicationDirPath() + "/../Resources/studio-setup.teraguchi-studio";
+#else
+    return {};
+#endif
+}
 QByteArray readFile(const QString& path) {
     QFile file(path);
     if (!QFileInfo(path).isFile() || QFileInfo(path).isSymLink() || !file.open(QIODevice::ReadOnly) || file.size() > MaxBytes) return {};
@@ -133,13 +142,14 @@ StudioSetup::StudioSetup(QObject* parent)
     : StudioSetup(TeraguchiStudio::pinnedPublicKey(),
         (QFile::exists(QDir::currentPath() + "/portable.dat") ? QDir::currentPath() + "/studio-config" :
             QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)) + "/studio-setup.json",
-        [] { return QDateTime::currentSecsSinceEpoch(); }, parent) {}
+        [] { return QDateTime::currentSecsSinceEpoch(); }, parent, bundledSetupPath()) {}
 
-StudioSetup::StudioSetup(QByteArray key, QString storage, std::function<qint64()> now, QObject* parent)
+StudioSetup::StudioSetup(QByteArray key, QString storage, std::function<qint64()> now, QObject* parent, QString bundledSetup)
     : QObject(parent), m_Key(std::move(key)), m_Storage(std::move(storage)), m_Now(std::move(now))
 {
     m_State = canImport() ? QStringLiteral("needed") : QStringLiteral("unconfigured");
     load();
+    loadBundled(bundledSetup);
     m_Timer.setInterval(1000);
     connect(&m_Timer, &QTimer::timeout, this, &StudioSetup::refresh);
     m_Timer.start();
@@ -176,6 +186,27 @@ void StudioSetup::load()
         else { m_State = QStringLiteral("expired"); m_Message = tr("The saved studio setup is not currently valid. Check your clock or import a current file."); }
     }
     else { m_State = QStringLiteral("invalid"); m_Message = reason; }
+}
+
+void StudioSetup::loadBundled(const QString& path)
+{
+    if (!canImport() || path.isEmpty() || !QFileInfo::exists(path)) return;
+    // A damaged saved record cannot establish the revision floor. Leave it for
+    // explicit repair instead of silently reverting to an older bundled copy.
+    if (m_State == QStringLiteral("invalid")) return;
+    QString reason;
+    const auto profile = TeraguchiStudio::verify(readFile(path), m_Key, m_Now(), &reason, true);
+    if (profile.revision && (profile.revision < m_Highest.revision ||
+            (profile.revision == m_Highest.revision && profile.digest == m_Highest.digest))) return;
+    if (!profile.revision || profile.workstations.isEmpty()) {
+        if (!ready()) m_State = QStringLiteral("invalid");
+        error(reason.isEmpty() ? tr("The included studio setup has no trusted workstations. Ask your studio for an updated app.") : reason);
+        return;
+    }
+    // The same signed import path enforces validity, conflicts, private storage
+    // and rollback protection. A package cannot replace a newer manual import.
+    if (importFile(QUrl::fromLocalFile(path))) qInfo("Bundled studio setup accepted");
+    else if (!ready()) m_State = QStringLiteral("invalid");
 }
 
 void StudioSetup::setDevelopmentSuffix(const QString& suffix)

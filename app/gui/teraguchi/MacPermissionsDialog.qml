@@ -10,7 +10,8 @@ Dialog {
     dim: false
     anchors.centerIn: parent
     width: Math.min(500, parent ? parent.width - 32 : 500)
-    title: qsTr("Mac input permissions")
+    height: Math.min(540, parent ? parent.height - 32 : 540)
+    title: qsTr("Mac input")
     standardButtons: Dialog.Close
     closePolicy: Popup.CloseOnEscape
     onOpened: { settingsError = ""; permissions.refresh(); }
@@ -22,85 +23,86 @@ Dialog {
         var requested = kind === "accessibility" ? permissions.requestAccessibility() : permissions.requestInputMonitoring();
         settingsError = requested ? "" : qsTr("Couldn't request access. Open the permission's Settings panel and add this app with the + button.");
     }
-    contentItem: ColumnLayout {
-        spacing: 14
-        Label {
-            Layout.fillWidth: true
-            text: qsTr("Allow %1 to capture workstation shortcuts while you're connected.").arg(dialog.permissions ? dialog.permissions.applicationName : qsTr("this client"))
-            wrapMode: Text.Wrap
-        }
-        Label {
-            Layout.fillWidth: true
-            text: qsTr("These checks apply to this running app. A diagnostic tool or another copy may have different access.")
-            wrapMode: Text.Wrap
-        }
-        Label {
-            Layout.fillWidth: true
-            text: qsTr("System Settings → Privacy & Security")
-            font.bold: true
-            wrapMode: Text.Wrap
-        }
+    contentItem: ScrollView {
+        id: scroll
+        clip: true
+        contentWidth: availableWidth
         ColumnLayout {
-            Layout.fillWidth: true
+            width: scroll.availableWidth
+            spacing: 14
             Label {
-                objectName: "accessibilityStatus"
                 Layout.fillWidth: true
-                text: qsTr("Accessibility: %1").arg(dialog.permissions && dialog.permissions.checked && dialog.permissions.accessibility ? qsTr("Allowed") : qsTr("Needed"))
+                text: qsTr("Allow %1 to send keyboard shortcuts and tablet input to your workstation.").arg(dialog.permissions ? dialog.permissions.applicationName : qsTr("this client"))
+                wrapMode: Text.Wrap
+            }
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("System Settings → Privacy & Security")
+                font.bold: true
+                wrapMode: Text.Wrap
+            }
+            ColumnLayout {
+                Layout.fillWidth: true
+                Label {
+                    objectName: "accessibilityStatus"
+                    Layout.fillWidth: true
+                    text: qsTr("Accessibility: %1").arg(dialog.permissions && dialog.permissions.checked && dialog.permissions.accessibility ? qsTr("Allowed") : qsTr("Needed"))
+                    wrapMode: Text.Wrap
+                }
+                Button {
+                    objectName: "requestAccessibility"
+                    text: qsTr("Request Accessibility")
+                    visible: dialog.permissions !== null && !dialog.permissions.accessibility
+                    enabled: dialog.permissions !== null && dialog.permissions.supported
+                    onClicked: dialog.requestAccess("accessibility")
+                }
+                Button {
+                    objectName: "openAccessibility"
+                    text: qsTr("Open Accessibility")
+                    enabled: dialog.permissions !== null && dialog.permissions.supported
+                    onClicked: dialog.openSettings("accessibility")
+                }
+            }
+            ColumnLayout {
+                Layout.fillWidth: true
+                Label {
+                    objectName: "inputMonitoringStatus"
+                    Layout.fillWidth: true
+                    text: qsTr("Input Monitoring: %1").arg(dialog.permissions && dialog.permissions.checked && dialog.permissions.inputMonitoring ? qsTr("Allowed") : qsTr("Needed"))
+                    wrapMode: Text.Wrap
+                }
+                Button {
+                    objectName: "requestInputMonitoring"
+                    text: qsTr("Request Input Monitoring")
+                    visible: dialog.permissions !== null && !dialog.permissions.inputMonitoring
+                    enabled: dialog.permissions !== null && dialog.permissions.supported
+                    onClicked: dialog.requestAccess("input-monitoring")
+                }
+                Button {
+                    objectName: "openInputMonitoring"
+                    text: qsTr("Open Input Monitoring")
+                    enabled: dialog.permissions !== null && dialog.permissions.supported
+                    onClicked: dialog.openSettings("input-monitoring")
+                }
+            }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: dialog.permissions && dialog.permissions.ready ?
+                    qsTr("Mac input is ready. Close this panel to choose your workstation.") :
+                    qsTr("Request each missing permission, then enable this app in Settings. If it is missing, use the + button to add this copy. Reopen the app if macOS asks, then check again.")
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: !!dialog.settingsError
+                text: dialog.settingsError
                 wrapMode: Text.Wrap
             }
             Button {
-                objectName: "requestAccessibility"
-                text: qsTr("Request Accessibility")
-                visible: dialog.permissions !== null && !dialog.permissions.accessibility
-                enabled: dialog.permissions !== null && dialog.permissions.supported
-                onClicked: dialog.requestAccess("accessibility")
+                objectName: "recheckPermissions"
+                text: qsTr("Check again")
+                onClicked: dialog.permissions.refresh()
             }
-            Button {
-                objectName: "openAccessibility"
-                text: qsTr("Open Accessibility")
-                enabled: dialog.permissions !== null && dialog.permissions.supported
-                onClicked: dialog.openSettings("accessibility")
-            }
-        }
-        ColumnLayout {
-            Layout.fillWidth: true
-            Label {
-                objectName: "inputMonitoringStatus"
-                Layout.fillWidth: true
-                text: qsTr("Input Monitoring: %1").arg(dialog.permissions && dialog.permissions.checked && dialog.permissions.inputMonitoring ? qsTr("Allowed") : qsTr("Needed"))
-                wrapMode: Text.Wrap
-            }
-            Button {
-                objectName: "requestInputMonitoring"
-                text: qsTr("Request Input Monitoring")
-                visible: dialog.permissions !== null && !dialog.permissions.inputMonitoring
-                enabled: dialog.permissions !== null && dialog.permissions.supported
-                onClicked: dialog.requestAccess("input-monitoring")
-            }
-            Button {
-                objectName: "openInputMonitoring"
-                text: qsTr("Open Input Monitoring")
-                enabled: dialog.permissions !== null && dialog.permissions.supported
-                onClicked: dialog.openSettings("input-monitoring")
-            }
-        }
-        Label {
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: dialog.permissions && dialog.permissions.ready ?
-                qsTr("Both permissions are allowed. Close this panel and connect when you're ready.") :
-                qsTr("Request each missing permission, then enable this app in Settings. If it is missing, use the + button to add this copy. Reopen the app if macOS asks, then check again.")
-        }
-        Label {
-            Layout.fillWidth: true
-            visible: !!dialog.settingsError
-            text: dialog.settingsError
-            wrapMode: Text.Wrap
-        }
-        Button {
-            objectName: "recheckPermissions"
-            text: qsTr("Check again")
-            onClicked: dialog.permissions.refresh()
         }
     }
 }

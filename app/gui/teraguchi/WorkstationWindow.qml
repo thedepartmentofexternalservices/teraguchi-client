@@ -10,7 +10,7 @@ import SupportDiagnostics 1.0
 
 ApplicationWindow {
     id: window
-    title: qsTr("Teraguchi — Development")
+    title: qsTr("Teraguchi")
     width: 1100
     height: 720
     minimumWidth: 720
@@ -114,50 +114,24 @@ ApplicationWindow {
         running: !window.quitting && !sessionRuntime.pending
         onTriggered: if (!workstationFlow.busy) workstationFlow.refresh()
     }
-    ColumnLayout {
+    WorkstationHome {
         anchors.fill: parent
-        spacing: 0
-        StudioSetupPanel {
-            Layout.fillWidth: true
-            Layout.margins: 12
-            setup: studioSetupService
-            busy: workstationFlow.busy || sessionRuntime.pending
-            onImportRequested: studioFileDialog.open()
-        }
-        Label {
-            Layout.fillWidth: true
-            Layout.margins: 12
-            visible: studioSetupService.ready && ["ready", "refreshing"].indexOf(tailscaleProvider.state) < 0
-            wrapMode: Text.Wrap
-            text: {
-                switch (tailscaleProvider.state) {
-                case "configuration-needed": return qsTr("Import a current studio setup file, then refresh.");
-                case "missing": return qsTr("Install Tailscale, then accept your studio's workstation invitation.");
-                case "needs-login": return qsTr("Sign in to Tailscale with the account that accepted your workstation invitation.");
-                case "needs-approval": return qsTr("Your Tailscale device is waiting for approval.");
-                case "stopped": return qsTr("Connect Tailscale, then refresh your workstations.");
-                case "no-shared-workstations": return qsTr("No shared studio workstations are visible. Accept your invitation in Tailscale, then refresh.");
-                default: return qsTr("Tailscale status is unavailable. Check Tailscale, then refresh.");
-                }
-            }
-        }
-        MacPermissionsPanel {
-            Layout.fillWidth: true
-            Layout.leftMargin: 12
-            Layout.rightMargin: 12
-            permissions: inputPermissions
-            onReviewRequested: permissionDialog.open()
-        }
-        WorkstationPicker {
-            Layout.fillWidth: true; Layout.fillHeight: true; flow: workstationFlow
-            onHelpRequested: supportDialog.open()
-        }
-        Label {
-            Layout.margins: 12
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: sessionRuntime.pending && !workstationFlow.busy && !workstationFlow.sessionOpen ? qsTr("Session cleanup must finish before another connection can start.") : qsTr("Displays are selected when you connect. One uses this window’s screen; two requires exactly two independent screens arranged side by side.")
-        }
+        flow: workstationFlow
+        studioSetup: studioSetupService
+        permissions: inputPermissions
+        tailscaleState: tailscaleProvider.state
+        cleanupPending: sessionRuntime.pending && !workstationFlow.busy && !workstationFlow.sessionOpen
+        onSettingsRequested: settingsDialog.open()
+        onPermissionsRequested: permissionDialog.open()
+        onHelpRequested: supportDialog.open()
+    }
+    WorkstationSettings {
+        id: settingsDialog
+        studioSetup: studioSetupService
+        permissions: inputPermissions
+        busy: workstationFlow.busy || sessionRuntime.pending
+        onImportRequested: studioFileDialog.open()
+        onPermissionsRequested: permissionDialog.open()
     }
     MacPermissionsDialog { id: permissionDialog; permissions: inputPermissions }
     SupportDialog {

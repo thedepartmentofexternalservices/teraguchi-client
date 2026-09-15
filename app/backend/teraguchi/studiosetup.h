@@ -50,7 +50,8 @@ class StudioSetup : public QObject {
 public:
     explicit StudioSetup(QObject* parent = nullptr);
     // Native fixture seam; not exposed to QML or configuration files.
-    StudioSetup(QByteArray key, QString storage, std::function<qint64()> now, QObject* parent = nullptr);
+    StudioSetup(QByteArray key, QString storage, std::function<qint64()> now, QObject* parent = nullptr,
+                QString bundledSetup = {});
     QString state() const { return m_State; }
     QString label() const { return ready() ? m_Permit->profile.label : QString(); }
     QString message() const { return m_Message; }
@@ -66,6 +67,7 @@ signals:
     void configurationChanged();
 private:
     void load();
+    void loadBundled(const QString& path);
     void accept(const TeraguchiStudio::Profile& profile);
     void error(const QString& message);
     QByteArray m_Key;
