@@ -45,7 +45,9 @@ QtObject {
     property Connections providerEvents: Connections {
         target: assignments.provider
         function onCatalogReady(token, entries, validityMs) {
-            assignments.flow.acceptCatalog(token, entries, validityMs);
+            // Native QVariantList signals expose a QML sequence, not a JS Array.
+            // Normalize here so the flow keeps its strict array/schema checks.
+            assignments.flow.acceptCatalog(token, Array.from(entries), validityMs);
         }
         function onCatalogFailed(token, reason) { assignments.flow.rejectCatalog(token); }
         function onCatalogInvalidated() { assignments.flow.invalidateCatalog(); }
