@@ -61,3 +61,21 @@ Do not connect this view directly to mDNS discoveries or label existing
 `authorized`/online bookmark roles as proof that a seat is free. Production
 integration needs authoritative assignment, freshness and occupancy handling.
 No password collection, settings persistence or permission changes occur here.
+
+## Optional studio power presentation
+
+`WorkstationPicker.studioPower` is null by default. A managed native adapter may
+supply `enabled`, `revision`, `pending`, `report(id)`, `requestStart(id)` and
+`requestRefresh(id)`. Reports match a stable assigned workstation ID and contain
+`state`, boolean `fresh`, boolean `startAllowed`, and optional `outlet` telemetry.
+Only a fresh, permitted `off` or verified `standby` report for an offline assigned
+workstation permits Power on. A powered outlet with unknown machine state is
+never enough. Session/connection logic is separate and unchanged.
+
+The adapter latches pending before dispatch and enforces duplicate suppression,
+freshness, identity and policy changes. The private service repeats authorization
+and safety checks and tracks durable jobs; QML flags are not security authority.
+A timeout must reconcile the accepted job, never blindly repeat a cycle. No
+Power off, raw cycle, Slack commands, controller address or credential is exposed.
+The root studio-power design records the full contract and implementation order.
+Only a fake provider exists in the root preview harness; no live adapter is built.
