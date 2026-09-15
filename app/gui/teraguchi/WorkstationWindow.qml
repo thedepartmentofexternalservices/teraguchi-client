@@ -4,6 +4,7 @@ import QtQuick.Layouts 1.15
 import ComputerManager 1.0
 import ComputerModel 1.0
 import TailscaleWorkstations 1.0
+import MacInputPermissions 1.0
 
 ApplicationWindow {
     id: window
@@ -46,8 +47,10 @@ ApplicationWindow {
         }
     }
     onVisibleChanged: updatePolling()
+    onActiveChanged: if (active && !quitting) permissionGate.refresh()
     Component.onCompleted: {
         computerCatalog.initialize(ComputerManager);
+        permissionGate.refresh();
         updatePolling();
         workstationFlow.refresh();
     }
@@ -55,11 +58,20 @@ ApplicationWindow {
     TailscaleWorkstations { id: tailscaleProvider; studioDnsSuffix: studioDnsSuffixConfiguration }
     TailscaleAssignments { id: assignmentBridge; flow: workstationFlow; provider: tailscaleProvider }
     ComputerModel { id: computerCatalog }
+    MacInputPermissions { id: inputPermissions }
+    MacPermissionsGate { id: permissionGate; flow: workstationFlow; provider: inputPermissions }
+    Timer {
+        interval: 2000
+        repeat: true
+        running: window.active && !window.quitting && !sessionRuntime.executing
+        onTriggered: permissionGate.refresh()
+    }
     TailscaleLogin {
         id: loginBridge
         assignments: assignmentBridge
         computers: computerCatalog
         onSessionPrepared: function(token, session) { sessionRuntime.prepare(token, session); }
+        onTokenChanged: if (token < 0) permissionGate.refresh()
     }
     WorkstationSession {
         id: sessionRuntime
@@ -69,7 +81,7 @@ ApplicationWindow {
         onPresentationStarted: window.hide()
         onReleased: {
             if (window.quitting) Qt.quit();
-            else { window.show(); window.raise(); workstationFlow.refresh(); }
+            else { permissionGate.refresh(); window.show(); window.raise(); workstationFlow.refresh(); }
             gc();
         }
     }
@@ -99,6 +111,13 @@ ApplicationWindow {
                 }
             }
         }
+        MacPermissionsPanel {
+            Layout.fillWidth: true
+            Layout.leftMargin: 12
+            Layout.rightMargin: 12
+            permissions: inputPermissions
+            onReviewRequested: permissionDialog.open()
+        }
         WorkstationPicker { Layout.fillWidth: true; Layout.fillHeight: true; flow: workstationFlow }
         Label {
             Layout.margins: 12
@@ -107,5 +126,6 @@ ApplicationWindow {
             text: sessionRuntime.pending && !workstationFlow.busy && !workstationFlow.sessionOpen ? qsTr("Session cleanup must finish before another connection can start.") : qsTr("One display uses the screen containing this window. Move this window to choose a different screen. Two-display Mac support is still in development.")
         }
     }
+    MacPermissionsDialog { id: permissionDialog; permissions: inputPermissions }
     AssignedLoginDialog { flow: workstationFlow; login: loginBridge }
 }

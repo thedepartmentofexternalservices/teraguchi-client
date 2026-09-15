@@ -1,6 +1,7 @@
 #include "computermodel.h"
 #include "backend/relaywakeclient.h"
 #include "backend/teraguchi/assignmenttarget.h"
+#include "backend/teraguchi/macinputaccess.h"
 #include "settings/plankclientpolicy.h"
 
 #include <utility>
@@ -391,6 +392,7 @@ QString ComputerModel::authenticateAssignedTarget(TailscaleWorkstations* assignm
                                                const QVariantMap& expected,
                                                QString username, QString password)
 {
+    if (!assignedInputPermissionsReady()) { password.fill(QChar(0)); return {}; }
     const auto current = assignedLoginTarget(assignments, expected.value(QStringLiteral("id")).toString());
     if (!TeraguchiAssignment::matches(expected, current)) {
         password.fill(QChar('\0'));
@@ -413,6 +415,11 @@ QString ComputerModel::authenticateAssignedTarget(TailscaleWorkstations* assignm
     return {};
 }
 
+bool ComputerModel::assignedInputPermissionsReady() const
+{
+    return MacInputAccess::query().ready();
+}
+
 QString ComputerModel::assignedDisplayError(int displays) const
 {
     return displays == 1 ? QString() : tr("Two-display sessions are not available in this Mac development build. Explicitly select one display to continue.");
@@ -425,7 +432,7 @@ Session* ComputerModel::createAssignedSession(TailscaleWorkstations* assignments
     Q_UNUSED(assignments); Q_UNUSED(expected); Q_UNUSED(displays); Q_UNUSED(requestId);
     return nullptr;
 #else
-    if (!assignedDisplayError(displays).isEmpty()) return nullptr;
+    if (!assignedInputPermissionsReady() || !assignedDisplayError(displays).isEmpty()) return nullptr;
     const auto current = assignedLoginTarget(assignments, expected.value(QStringLiteral("id")).toString());
     if (!TeraguchiAssignment::matches(expected, current)) return nullptr;
     QString username, password;

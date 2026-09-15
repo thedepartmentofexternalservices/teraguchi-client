@@ -651,6 +651,8 @@ VERSION = "$$section(PLANK_VERSION, -, 0, 0)"
 DEFINES += PLANK_VERSION_STR=\\\"$$PLANK_VERSION\\\"
 
 # Local Tailscale discovery is independent of the transport and credentials.
+HEADERS += backend/teraguchi/macinputpermissions.h backend/teraguchi/macinputaccess.h
+SOURCES += backend/teraguchi/macinputpermissions.cpp
 HEADERS += backend/teraguchi/assignmentwatch.h
 SOURCES += backend/teraguchi/assignmentwatch.cpp
 HEADERS += backend/teraguchi/tailscaleworkstations.h

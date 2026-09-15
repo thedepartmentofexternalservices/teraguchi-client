@@ -21,6 +21,12 @@ QtObject {
             } else login.finishPreparation();
         }
     }
+    function permissionsReady() {
+        if (computers.assignedInputPermissionsReady()) return true;
+        assignments.flow.acceptCheck(token, {outcome: "permissions"});
+        cancel();
+        return false;
+    }
     function finishPreparation() {
         if (!assignments.resolveLoginTarget(token, preparingNodeId)) { assignments.flow.invalidateCatalog(); cancel(); return; }
         var resolved = computers.assignedLoginTarget(assignments.provider, preparingNodeId);
@@ -29,7 +35,7 @@ QtObject {
         preparingNodeId = "";
         preparationTimer.stop();
         if (!current()) { cancel(); return; }
-        credentialsRequested(token);
+        if (permissionsReady()) credentialsRequested(token);
     }
     signal credentialsRequested(int token)
     signal sessionPrepared(int token, var session)
@@ -50,6 +56,7 @@ QtObject {
     function submit(expectedToken, username, password) {
         if (expectedToken !== token || !current() || requestId !== "")
             return false;
+        if (!permissionsReady()) return false;
         requestId = computers.authenticateAssignedTarget(assignments.provider, target, username, password);
         if (!requestId) {
             assignments.flow.acceptCheck(token, {outcome: "unknown"});
@@ -68,6 +75,7 @@ QtObject {
                 return;
             }
             login.token = token;
+            if (!login.permissionsReady()) return;
             login.preparingNodeId = nodeId;
             login.finishPreparation();
             if (login.preparingNodeId) {
@@ -97,6 +105,7 @@ QtObject {
                 login.cancel();
                 return;
             }
+            if (!login.permissionsReady()) return;
             var session = login.computers.createAssignedSession(login.assignments.provider, login.target, login.assignments.flow.attemptDisplays, login.requestId);
             if (!session) {
                 login.assignments.flow.acceptCheck(login.token, {outcome: "unknown"});

@@ -1,5 +1,6 @@
 #include "session.h"
 #include "backend/teraguchi/assignmentwatch.h"
+#include "backend/teraguchi/macinputaccess.h"
 #include "video/teraguchivideo.h"
 #ifdef Q_OS_MACOS
 #include "input/macpen.h"
@@ -856,6 +857,8 @@ void Session::bindAssignedTarget(TailscaleWorkstations* provider, const QVariant
 void Session::validateAssignedEndpoint()
 {
     if (!m_AssignmentWatch) return;
+    if (!MacInputAccess::query().ready())
+        throw GfeHttpResponseException(401, "Mac input permissions changed; check Accessibility and Input Monitoring");
     if (m_DisconnectRequested.load() || !m_AssignmentWatch->permitsConnection())
         throw GfeHttpResponseException(401, "Workstation assignment needs a fresh check");
     // Use a credential-free probe before any session-token or PAM request.
@@ -1628,6 +1631,10 @@ void Session::clearPlankReconnectCredentials()
 
 bool Session::initialize()
 {
+    if (m_AssignedDisplayCount && !MacInputAccess::query().ready()) {
+        emit displayLaunchError(tr("Allow Accessibility and Input Monitoring for this client, then connect again."));
+        return false;
+    }
     if (!TeraguchiVideo::acceptsCapture(decoderCaptureSource())) {
         emit displayLaunchError(tr("Teraguchi requires Native X11/XShm 10-bit capture. "
                                    "This bookmark uses a different capture source; its settings have not been changed."));
@@ -4082,6 +4089,7 @@ void Session::execInternal()
         }
     }
     SDL_Event event;
+    Uint64 nextPermissionCheck = 0;
     for (;;) {
 #ifdef Q_OS_MACOS
         if (m_PenDisconnectRequested) goto DispatchDeferredCleanup;
@@ -4109,6 +4117,13 @@ void Session::execInternal()
             goto DispatchDeferredCleanup;
         }
         const Uint64 now = SDL_GetTicks();
+        if (m_AssignedDisplayCount && now >= nextPermissionCheck) {
+            nextPermissionCheck = now + 2000;
+            if (!MacInputAccess::query().ready()) {
+                emit displayLaunchError(tr("Mac input permissions changed. The session has closed to release held input. Check Accessibility and Input Monitoring, then reconnect."));
+                goto DispatchDeferredCleanup;
+            }
+        }
         const bool videoSilent = PlankHostRecovery::videoSilent(now, m_LastPlankVideoReceived.load());
         if (workerProbe != nullptr && workerProbe->isFinished()) {
             workerProbe->wait();

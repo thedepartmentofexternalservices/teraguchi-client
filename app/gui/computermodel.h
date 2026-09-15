@@ -55,6 +55,7 @@ public:
                                                const QVariantMap& expected, int displays, const QString& requestId);
     Q_INVOKABLE void cancelAssignedAuthentication(const QString& requestId);
     Q_INVOKABLE QString assignedDisplayError(int displays) const;
+    Q_INVOKABLE bool assignedInputPermissionsReady() const;
 
     Q_INVOKABLE int plankScalingChoice(int computerIndex) const;
 

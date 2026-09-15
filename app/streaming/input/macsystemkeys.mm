@@ -6,6 +6,7 @@
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <Carbon/Carbon.h>
+#include "backend/teraguchi/macinputaccess.h"
 
 struct MacSystemKeys::Impl
 {
@@ -162,7 +163,7 @@ struct MacSystemKeys::Impl
         SDL_assert(SDL_IsMainThread());
         if (failed) return false;
         if (tap) return CGEventTapIsEnabled(tap);
-        if (!AXIsProcessTrusted() || !CGPreflightListenEventAccess() || !prepareDelivery()) return false;
+        if (!MacInputAccess::query().ready() || !prepareDelivery()) return false;
         const CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp);
         tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
                               kCGEventTapOptionDefault, mask, callback, this);
