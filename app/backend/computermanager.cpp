@@ -658,6 +658,8 @@ void ComputerManager::clientSideAttributeUpdated(NvComputer* computer)
 
 void ComputerManager::handleAboutToQuit()
 {
+    const auto requests = m_AssignedAuthentications.keys();
+    for (const auto& request : requests) cancelAssignedAuthentication(request);
     QReadLocker lock(&m_Lock);
 
     // Interrupt polling threads immediately, so they
@@ -674,14 +676,16 @@ class PendingAuthenticationTask : public QObject, public QRunnable
 public:
     PendingAuthenticationTask(ComputerManager* computerManager, NvComputer* computer,
                               QString username, QString password, QString matchedDesktopMode,
-                              NvAddress expectedAddress, QString expectedServerUuid, QString requestId)
+                              NvAddress expectedAddress, QString expectedServerUuid, QString requestId,
+                              std::shared_ptr<AssignedAuthentication> assigned)
         : m_ComputerManager(computerManager),
           m_Computer(computer),
           m_Username(std::move(username)),
           m_Password(std::move(password)),
           m_MatchedDesktopMode(std::move(matchedDesktopMode)),
           m_ExpectedAddress(std::move(expectedAddress)),
-          m_ExpectedServerUuid(std::move(expectedServerUuid))
+          m_ExpectedServerUuid(std::move(expectedServerUuid)),
+          m_Assigned(std::move(assigned))
     {
         connect(this, &PendingAuthenticationTask::authenticationCompleted,
                 computerManager, [computerManager, requestId](NvComputer* target, const QString& error) {
@@ -727,6 +731,7 @@ private:
                 if (NvHTTP::getXmlString(info, "uniqueid") != m_ExpectedServerUuid)
                     throw GfeHttpResponseException(401, "Assigned workstation identity changed before sign-in");
             }
+            if (m_Assigned) { QMutexLocker lock(&m_Assigned->lock); if (m_Assigned->cancelled) return; }
             bool greeter = false;
             const QString token = http.authenticate(m_Username, m_Password, &greeter);
             NvOutputTopology topology;
@@ -750,6 +755,23 @@ private:
                 QReadLocker lock(&m_Computer->lock);
                 if (m_Computer->activeAddress != m_ExpectedAddress || m_Computer->serverUuid != m_ExpectedServerUuid)
                     throw GfeHttpResponseException(401, "Assigned workstation changed during sign-in");
+            }
+            if (m_Assigned) {
+                QMutexLocker resultLock(&m_Assigned->lock);
+                if (m_Assigned->cancelled) return;
+                QReadLocker computerLock(&m_Computer->lock);
+                auto result = std::make_unique<NvComputer>(*m_Computer);
+                result->sessionToken = token;
+                result->authorizationState = NvComputer::AS_AUTHORIZED;
+                if (topologySupported) result->outputTopology = topology;
+                result->updateAppList(apps);
+                m_Assigned->computer = std::move(result);
+                m_Assigned->username = std::move(m_Username);
+                m_Assigned->password = std::move(m_Password);
+                computerLock.unlock();
+                resultLock.unlock();
+                emit authenticationCompleted(m_Computer, nullptr);
+                return;
             }
             m_ComputerManager->rememberPlankReconnectCredentials(
                         m_Computer, m_Username, std::move(m_Password));
@@ -787,6 +809,7 @@ private:
     QString m_MatchedDesktopMode;
     NvAddress m_ExpectedAddress;
     QString m_ExpectedServerUuid;
+    std::shared_ptr<AssignedAuthentication> m_Assigned;
 };
 
 void ComputerManager::authenticateHost(NvComputer* computer, QString username,
@@ -827,10 +850,40 @@ void ComputerManager::authenticateHost(NvComputer* computer, QString username,
             return;
         }
     }
+    std::shared_ptr<AssignedAuthentication> assigned;
+    if (!requestId.isEmpty()) {
+        assigned = std::make_shared<AssignedAuthentication>();
+        m_AssignedAuthentications.insert(requestId, assigned);
+    }
     PendingAuthenticationTask* authentication = new PendingAuthenticationTask(
         this, computer, std::move(username), std::move(password), matchedMode,
-        std::move(expectedAddress), std::move(expectedServerUuid), std::move(requestId));
+        std::move(expectedAddress), std::move(expectedServerUuid), std::move(requestId), std::move(assigned));
     QThreadPool::globalInstance()->start(authentication);
+}
+
+void ComputerManager::cancelAssignedAuthentication(const QString& requestId)
+{
+    auto result = m_AssignedAuthentications.take(requestId);
+    if (!result) return;
+    QMutexLocker lock(&result->lock);
+    result->cancelled = true;
+    result->password.fill(QChar(0));
+    result->password.clear();
+    result->username.clear();
+    result->computer.reset();
+}
+
+std::unique_ptr<NvComputer> ComputerManager::takeAssignedAuthentication(
+        const QString& requestId, QString& username, QString& password)
+{
+    auto result = m_AssignedAuthentications.take(requestId);
+    if (!result) return {};
+    QMutexLocker lock(&result->lock);
+    if (result->cancelled || !result->computer) return {};
+    result->cancelled = true;
+    username = std::move(result->username);
+    password = std::move(result->password);
+    return std::move(result->computer);
 }
 
 void ComputerManager::rememberPlankReconnectCredentials(

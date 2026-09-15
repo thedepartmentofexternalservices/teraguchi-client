@@ -38,8 +38,9 @@ QtObject {
         return target !== null && assignments.targetStillCurrent(token, target.id, target.address, target.identity);
     }
     function cancel() {
-        // Retire the callback; native PAM may still be finishing. No new session
-        // can be created by that reply, even if another login starts meanwhile.
+        // Retire both the callback and the request-scoped native result.
+        // In-flight PAM may finish, but its credentials cannot be retained.
+        if (requestId) computers.cancelAssignedAuthentication(requestId);
         preparationTimer.stop();
         preparingNodeId = "";
         target = null;
@@ -61,6 +62,11 @@ QtObject {
         target: login.assignments
         function onLoginRequested(token, nodeId, address, identity, displays, resume) {
             login.cancel();
+            var displayError = login.computers.assignedDisplayError(displays);
+            if (displayError) {
+                login.assignments.flow.block(qsTr("Selected displays unavailable"), displayError);
+                return;
+            }
             login.token = token;
             login.preparingNodeId = nodeId;
             login.finishPreparation();
@@ -91,7 +97,7 @@ QtObject {
                 login.cancel();
                 return;
             }
-            var session = login.computers.createAssignedSession(login.assignments.provider, login.target);
+            var session = login.computers.createAssignedSession(login.assignments.provider, login.target, login.assignments.flow.attemptDisplays, login.requestId);
             if (!session) {
                 login.assignments.flow.acceptCheck(login.token, {outcome: "unknown"});
                 login.cancel();

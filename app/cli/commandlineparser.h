@@ -11,12 +11,16 @@ public:
     enum ParseResult {
         NormalStartRequested,
         StreamRequested,
+        WorkstationsRequested,
     };
 
     GlobalCommandLineParser();
     virtual ~GlobalCommandLineParser();
 
     ParseResult parse(const QStringList &args);
+    QString studioDnsSuffix() const { return m_StudioDnsSuffix; }
+private:
+    QString m_StudioDnsSuffix;
 
 };
 

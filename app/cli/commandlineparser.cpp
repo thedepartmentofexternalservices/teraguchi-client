@@ -1,4 +1,5 @@
 #include "commandlineparser.h"
+#include "backend/teraguchi/tailscaleworkstations.h"
 
 #include <QCommandLineParser>
 #include <QFile>
@@ -208,6 +209,8 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
         "\n"
         "See 'plank-client <action> --help' for help of specific action."
     );
+    parser.addOption(QCommandLineOption("workstations", "Open the Teraguchi development workstation picker (strict Mac build only)."));
+    parser.addOption(QCommandLineOption("studio-dns-suffix", "Exact studio Tailscale DNS suffix from trusted setup.", "suffix"));
     parser.addPositionalArgument("action", "Action to execute", "<action>");
     parser.parse(args);
     auto posArgs = parser.positionalArguments();
@@ -217,9 +220,21 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
         // or --help is specified
         parser.handleHelpAndVersionOptions();
         parser.handleUnknownOptions();
+        if (parser.isSet("workstations")) {
+#if defined(Q_OS_MACOS) && defined(TERAGUCHI_STRICT_VIDEO)
+            m_StudioDnsSuffix = TailscaleWorkstations::normalizedSuffix(parser.value("studio-dns-suffix"));
+            if (parser.isSet("studio-dns-suffix") && m_StudioDnsSuffix.isEmpty())
+                parser.showError("Studio setup requires an exact tailnet DNS suffix");
+            return WorkstationsRequested;
+#else
+            parser.showError("The workstation picker requires the strict Teraguchi Mac build");
+#endif
+        }
+        if (parser.isSet("studio-dns-suffix")) parser.showError("Studio setup requires --workstations");
         return NormalStartRequested;
     }
     else {
+        if (parser.isSet("workstations") || parser.isSet("studio-dns-suffix")) parser.showError("Workstation setup cannot be combined with another action");
         // If users supply arguments that accept values prior to the "stream"
         // positional argument, we will not be able to correctly
         // parse the value out of the input because this QCommandLineParser

@@ -15,6 +15,7 @@ QtObject {
     property int attemptDisplays: 0
     property bool resumeAttempt: false
     property bool retainsSession: false
+    property bool runtimePending: false
     // Local cache freshness is independent of session authorization/lease state.
     property bool catalogFresh: false
     property bool catalogRefreshing: false
@@ -33,8 +34,8 @@ QtObject {
     readonly property var selected: findWorkstation(selectedId)
     readonly property bool busy: phase === "checking" || phase === "connecting"
     readonly property bool sessionOpen: retainsSession
-    readonly property bool canConnect: catalogFresh && !catalogRefreshing && selected !== null && selected.status === "ready" && !busy && !sessionOpen
-    readonly property bool canChoose: !busy && !sessionOpen
+    readonly property bool canConnect: catalogFresh && !catalogRefreshing && selected !== null && selected.status === "ready" && !busy && !sessionOpen && !runtimePending
+    readonly property bool canChoose: !busy && !sessionOpen && !runtimePending
 
     signal checkRequested(int token, string workstationId, int displays, bool resume)
     signal connectionRequested(int token, string workstationId, int displays, bool resume)
@@ -54,7 +55,9 @@ QtObject {
         var oldCatalogToken = catalogGeneration;
         var wasRefreshing = catalogRefreshing;
         var oldToken = generation;
-        var wasBusy = busy;
+        // Native startup has its own background assignment guard. UI cache
+        // expiry cannot cancel a still-authorized host display transition.
+        var wasBusy = busy && !runtimePending;
         ++catalogGeneration;
         // Retire connection callbacks before any property notifications or signals.
         if (wasBusy)
@@ -261,6 +264,24 @@ QtObject {
         }
         phase = "connecting";
         connectionRequested(token, attemptId, attemptDisplays, resumeAttempt);
+        return true;
+    }
+
+    // The production native Session performs admission inside exec(). Moving
+    // into startup does not attest to video, a free seat, or a live connection.
+    function beginNativeSession(token) {
+        if (token !== generation || phase !== "checking" || !catalogIsCurrent() || runtimePending)
+            return false;
+        runtimePending = true;
+        phase = "connecting";
+        return true;
+    }
+
+    function acceptNativeConnection(token) {
+        if (token !== generation || phase !== "connecting" || !runtimePending)
+            return false;
+        retainsSession = true;
+        phase = "connected";
         return true;
     }
 

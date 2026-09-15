@@ -155,6 +155,13 @@ bool TailscaleWorkstations::fresh() const
             wallAge >= 0 && wallAge < ValidityMs;
 }
 
+int TailscaleWorkstations::remainingValidityMs() const
+{
+    if (!fresh()) return 0;
+    return static_cast<int>(ValidityMs - qMax(m_SnapshotAge.elapsed(),
+        QDateTime::currentMSecsSinceEpoch() - m_SnapshotWallTime));
+}
+
 void TailscaleWorkstations::setStudioDnsSuffix(const QString& suffix)
 {
     const auto normalized = normalizedSuffix(suffix);

@@ -23,7 +23,10 @@
         <file>gui/PlankCheckBox.qml</file>
         <file>gui/PlankComboBox.qml</file>
         <file>gui/PlankTextField.qml</file>
-            <file>gui/teraguchi/TailscaleAssignments.qml</file>
+        <file>gui/teraguchi/TailscaleAssignments.qml</file>
+        <file>gui/teraguchi/AssignedLoginDialog.qml</file>
+        <file>gui/teraguchi/WorkstationSession.qml</file>
+        <file>gui/teraguchi/WorkstationWindow.qml</file>
         <file>gui/teraguchi/TeraguchiButton.qml</file>
         <file>gui/teraguchi/TeraguchiComputerIcon.qml</file>
         <file>gui/teraguchi/TeraguchiDisplayChoice.qml</file>

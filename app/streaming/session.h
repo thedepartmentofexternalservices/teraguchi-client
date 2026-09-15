@@ -22,6 +22,8 @@
 #include "videopacketlosswindow.h"
 
 class ComputerManager;
+class AssignmentWatch;
+class TailscaleWorkstations;
 class PlankToolbar;
 #ifdef PLANK_TRANSPORT
 struct PlankTransportNativeEndpoint;
@@ -133,6 +135,9 @@ public:
     Q_INVOKABLE void exec(QWindow* qtWindow);
 
     Q_INVOKABLE void cancelConnectionStart();
+    Q_INVOKABLE void requestDisconnect();
+    void bindAssignedTarget(TailscaleWorkstations* provider, const QVariantMap& target, int displays);
+    void setAssignedCredentials(QString username, QString password);
 
     Q_INVOKABLE void respondToActiveSessionTakeover(bool takeOver);
 
@@ -190,6 +195,9 @@ signals:
     void stageFailed(QString stage, int errorCode, QString failingPorts);
 
     void connectionStarted();
+    // Native negotiation and real renderer initialization have succeeded.
+    // This is not a hardware qualification or first-presented-frame claim.
+    void presentationReady();
 
     void sessionCleanupWaitChanged(bool waiting, QString text);
 
@@ -207,6 +215,7 @@ signals:
 
 private:
     void execInternal();
+    void validateAssignedEndpoint();
 
     bool initialize();
 
@@ -383,6 +392,11 @@ private:
     DECODER_RENDERER_CALLBACKS m_VideoCallbacks;
     AUDIO_RENDERER_CALLBACKS m_AudioCallbacks;
     NvComputer* m_Computer;
+    std::unique_ptr<NvComputer> m_AssignedComputer;
+    std::unique_ptr<AssignmentWatch> m_AssignmentWatch;
+    int m_AssignedDisplayCount = 0;
+    std::atomic_bool m_DisconnectRequested{false};
+    bool m_PresentationReady = false;
     StreamingPreferences::PlankVideoProfile m_PlankVideoProfile;
     StreamingPreferences::PlankCaptureSource m_PlankCaptureSource;
 #ifdef PLANK_TRANSPORT

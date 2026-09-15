@@ -1,4 +1,5 @@
 #include "session.h"
+#include "backend/teraguchi/assignmentwatch.h"
 #include "video/teraguchivideo.h"
 #ifdef Q_OS_MACOS
 #include "input/macpen.h"
@@ -834,6 +835,55 @@ Session::Session(NvComputer* computer, NvApp& app,
         // chroma sampling, and identity mapping; otherwise the same profile
         // falls back to FFmpeg software decoding without changing formats.
     }
+}
+
+void Session::bindAssignedTarget(TailscaleWorkstations* provider, const QVariantMap& target, int displays)
+{
+    // Keep all route, topology and reconnect reads session-local.
+    m_AssignedComputer = std::make_unique<NvComputer>(*m_Computer);
+    m_Computer = m_AssignedComputer.get();
+    m_ComputerManager = nullptr; // Never persist session-local route/topology changes.
+    m_Computer->plankHostLayout = NvOutputTopology::MatchClientHostLayout;
+    m_AssignedDisplayCount = displays;
+    m_AllowActiveSessionTakeover = false;
+    m_AssignmentWatch = std::make_unique<AssignmentWatch>(provider->studioDnsSuffix(), target, provider->remainingValidityMs());
+    connect(m_AssignmentWatch.get(), &AssignmentWatch::assignmentRemoved, this, [this] {
+        requestDisconnect();
+        emit displayLaunchError(tr("Your workstation assignment changed. Refresh the list before connecting again."));
+    }, Qt::DirectConnection);
+}
+
+void Session::validateAssignedEndpoint()
+{
+    if (!m_AssignmentWatch) return;
+    if (m_DisconnectRequested.load() || !m_AssignmentWatch->permitsConnection())
+        throw GfeHttpResponseException(401, "Workstation assignment needs a fresh check");
+    // Use a credential-free probe before any session-token or PAM request.
+    NvHTTP probe(m_Computer->activeAddress);
+    const auto info = probe.getServerInfo(NvHTTP::NVLL_NONE, true);
+    if (NvHTTP::getXmlString(info, "uniqueid") != m_Computer->serverUuid) {
+        requestDisconnect();
+        throw GfeHttpResponseException(401, "Workstation identity changed; refresh before connecting again");
+    }
+    if (m_DisconnectRequested.load() || !m_AssignmentWatch->permitsConnection())
+        throw GfeHttpResponseException(401, "Workstation assignment changed during verification");
+}
+
+void Session::setAssignedCredentials(QString username, QString password)
+{
+    m_PlankUsername = std::move(username);
+    m_PlankPassword = std::move(password);
+    m_CanReconnect.store(!m_PlankUsername.isEmpty() && !m_PlankPassword.isEmpty());
+}
+
+void Session::requestDisconnect()
+{
+    // Callable from the assignment worker even while SDL owns the main thread.
+    // Use a sticky flag, not a global SDL Quit event that could hit a later session.
+    m_DisconnectRequested.store(true);
+    m_ReconnectCancelled.store(true);
+    m_CanReconnect.store(false);
+    cancelConnectionStart();
 }
 
 Session::~Session()
@@ -1904,7 +1954,7 @@ private:
 
 int Session::getTargetDisplayIndex() const
 {
-    int displayIndex = 0;
+    int displayIndex = m_AssignedDisplayCount ? -1 : 0;
 
     if (m_Window != nullptr) {
         displayIndex = StreamUtils::getDisplayIndex(SDL_GetDisplayForWindow(m_Window));
@@ -1959,10 +2009,22 @@ int Session::getTargetDisplayIndex() const
 bool Session::snapshotClientDisplays()
 {
     m_ClientDisplays.clear();
+    // The Mac renderer currently presents one output. Never make a two-display
+    // request look successful by compressing it into that one surface.
+    if (m_AssignedDisplayCount != 0 && m_AssignedDisplayCount != 1) {
+        emit displayLaunchError(tr("Two-display sessions are not available in this Mac development build. Explicitly select one display to continue."));
+        return false;
+    }
+    if (m_AssignedDisplayCount && (!m_QtWindow || !m_QtWindow->screen())) {
+        emit displayLaunchError(tr("The selected client display is unavailable."));
+        return false;
+    }
     const int targetIndex = getTargetDisplayIndex();
+    if (targetIndex < 0) { emit displayLaunchError(tr("The selected client display is unavailable.")); return false; }
     m_TargetDisplayId = StreamUtils::getDisplayId(targetIndex);
     const int displayCount = StreamUtils::getDisplayCount();
     for (int index = 0; index < displayCount; ++index) {
+        if (m_AssignedDisplayCount && index != targetIndex) continue;
         ClientDisplaySnapshot snapshot;
         snapshot.displayId = StreamUtils::getDisplayId(index);
         SDL_DisplayMode nativeMode;
@@ -2667,6 +2729,11 @@ bool Session::startConnectionAsync(bool reconnecting,
         SDL_Delay(1500);
     }
 
+    if (m_DisconnectRequested.load() || (m_AssignmentWatch && !m_AssignmentWatch->permitsConnection())) {
+        emit displayLaunchError(tr("The workstation assignment needs a fresh check before connecting."));
+        return false;
+    }
+
     // PLANK never terminates a host application remotely. Only resume
     // the already-running Desktop application or launch it from an idle host.
     Q_ASSERT(m_Computer->currentGameId == 0 ||
@@ -2760,6 +2827,7 @@ bool Session::startConnectionAsync(bool reconnecting,
             return false;
         }
         const auto startApp = [&]() {
+            validateAssignedEndpoint();
             if (macCapture) {
                 QString pin;
                 const NvOutputTopology topology = http->getOutputTopology(&pin);
@@ -2860,6 +2928,7 @@ bool Session::startConnectionAsync(bool reconnecting,
                                 m_Computer->authorizationState = NvComputer::AS_UNAUTHORIZED;
                                 m_Computer->currentGameId = 0;
                             }
+                            validateAssignedEndpoint();
                             http = std::make_unique<NvHTTP>(m_Computer);
                             const QString token = http->authenticate(
                                         m_PlankUsername,
@@ -3151,6 +3220,7 @@ bool Session::startConnectionAsync(bool reconnecting,
         return false;
     }
 
+    if (m_DisconnectRequested.load()) return false;
     emit connectionStarted();
     return true;
 }
@@ -3235,7 +3305,7 @@ bool Session::beginPlankReconnect(
     stopPlankTransportDataPlane();
     m_InputHandler->resetRemoteCursorPositionEpoch();
     m_ReconnectCancelled.store(false);
-    m_ConnectionStartCancelled.store(false);
+    m_ConnectionStartCancelled.store(m_DisconnectRequested.load());
     return true;
 }
 
@@ -3247,6 +3317,11 @@ bool Session::runPlankReconnect()
     }
 
     for (int attempt = 1; !m_ReconnectCancelled.load(); ++attempt) {
+        if (m_DisconnectRequested.load()) return false;
+        if (m_AssignmentWatch && !m_AssignmentWatch->permitsConnection()) {
+            SDL_Delay(50);
+            continue;
+        }
         try {
             {
                 QWriteLocker lock(&m_Computer->lock);
@@ -3259,6 +3334,7 @@ bool Session::runPlankReconnect()
                 m_Computer->currentGameId = 0;
             }
             NvHTTP http(m_Computer);
+            validateAssignedEndpoint();
             bool greeterConfirmed = false;
             const QString token = http.authenticate(
                         m_PlankUsername,
@@ -3377,7 +3453,7 @@ bool Session::finishPlankReconnect(
     setPlankReconnectStatus("", false);
     m_ReconnectRequested = false;
     m_ReconnectCancelled.store(false);
-    m_ConnectionStartCancelled.store(false);
+    m_ConnectionStartCancelled.store(m_DisconnectRequested.load());
     m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
 
     m_OverlayManager.setOverlayColor(Overlay::OverlayStatusUpdate, {0xCC, 0x00, 0x00, 0xFF});
@@ -3521,6 +3597,7 @@ public:
 void Session::exec(QWindow* qtWindow)
 {
     m_QtWindow = qtWindow;
+    if (m_AssignmentWatch) m_AssignmentWatch->start();
 
     // Use a separate thread for the streaming session on X11 or Wayland
     // to ensure we don't stomp on Qt's GL context. This breaks when using
@@ -3536,7 +3613,7 @@ void Session::exec(QWindow* qtWindow)
         // to update the Qt UI to allow warning messages to display and
         // make sure that the Qt window can hide itself.
         while (!execThread.wait(10) && m_Window == nullptr) {
-            const bool allowUserInput =
+            const bool allowUserInput = m_AssignedDisplayCount != 0 ||
                     m_WaitingForSessionCleanup.load() ||
                     m_WaitingForActiveSessionTakeoverDecision.load();
             QCoreApplication::processEvents(
@@ -3545,7 +3622,7 @@ void Session::exec(QWindow* qtWindow)
                             QEventLoop::ExcludeUserInputEvents);
             QCoreApplication::sendPostedEvents();
         }
-        const bool allowUserInput =
+        const bool allowUserInput = m_AssignedDisplayCount != 0 ||
                 m_WaitingForSessionCleanup.load() ||
                 m_WaitingForActiveSessionTakeoverDecision.load();
         QCoreApplication::processEvents(
@@ -3562,6 +3639,7 @@ void Session::exec(QWindow* qtWindow)
         // Run the streaming session on the main thread for Windows and macOS
         execInternal();
     }
+    if (m_AssignmentWatch) { m_AssignmentWatch->requestInterruption(); m_AssignmentWatch->quit(); m_AssignmentWatch->wait(); }
 }
 
 void Session::execInternal()
@@ -3572,7 +3650,7 @@ void Session::execInternal()
     //
     // NB: This initializes the SDL video subsystem, so it must be
     // called on the main thread.
-    if (!initialize()) {
+    if (m_DisconnectRequested.load() || !initialize()) {
         emit sessionFinished();
         emit readyForDeletion();
         return;
@@ -3592,13 +3670,13 @@ void Session::execInternal()
                                          m_StreamConfig.width,
                                          m_StreamConfig.height);
 
-    m_ConnectionStartCancelled.store(false);
+    m_ConnectionStartCancelled.store(m_DisconnectRequested.load());
     AsyncConnectionStartThread asyncConnThread(this);
     if (!m_ThreadedExec) {
         // Kick off the async connection thread while we sit here and pump the event loop
         asyncConnThread.start();
         while (!asyncConnThread.wait(10)) {
-            const bool allowUserInput =
+            const bool allowUserInput = m_AssignedDisplayCount != 0 ||
                     m_WaitingForSessionCleanup.load() ||
                     m_WaitingForActiveSessionTakeoverDecision.load();
             QCoreApplication::processEvents(
@@ -3621,7 +3699,7 @@ void Session::execInternal()
     }
 
     // If the connection failed, clean up and abort the connection.
-    if (!m_AsyncConnectionSuccess) {
+    if (!m_AsyncConnectionSuccess || m_DisconnectRequested.load()) {
         delete m_InputHandler;
         m_InputHandler = nullptr;
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
@@ -4014,6 +4092,12 @@ void Session::execInternal()
             goto DispatchDeferredCleanup;
         }
 #endif
+        if (m_DisconnectRequested.load()) goto DispatchDeferredCleanup;
+        if (m_AssignedDisplayCount && (StreamUtils::getDisplayIndex(m_TargetDisplayId) < 0 ||
+                SDL_GetDisplayForWindow(m_Window) != m_TargetDisplayId)) {
+            emit displayLaunchError(tr("The selected display changed or became unavailable. Check your display before starting another session."));
+            goto DispatchDeferredCleanup;
+        }
         if (m_PenInputRejected.load()) {
             emit displayLaunchError(tr("The workstation could not accept pen input. "
                                        "The connection has stopped to release any held input."));
@@ -4587,6 +4671,14 @@ void Session::execInternal()
             m_InputHandler->updatePointerRegionLock();
 
             SDL_UnlockSpinlock(&m_DecoderLock);
+            if (!m_PresentationReady && m_AssignmentWatch && !m_AssignmentWatch->permitsConnection()) {
+                emit displayLaunchError(tr("The workstation assignment needs a fresh check before opening the display."));
+                goto DispatchDeferredCleanup;
+            }
+            if (!m_PresentationReady && !m_DisconnectRequested.load()) {
+                m_PresentationReady = true;
+                emit presentationReady();
+            }
             break;
 
 #ifdef Q_OS_MACOS

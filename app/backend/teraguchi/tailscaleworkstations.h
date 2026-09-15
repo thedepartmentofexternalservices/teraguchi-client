@@ -35,6 +35,8 @@ public:
     QString state() const { return m_State; }
     bool busy() const { return !m_Process.isNull(); }
     bool fresh() const;
+    QString currentIdentity() const { return m_Identity; }
+    int remainingValidityMs() const;
     QVariantList workstations() const { return m_Workstations; }
     Q_INVOKABLE void refresh(int token);
     Q_INVOKABLE void cancel(int token);

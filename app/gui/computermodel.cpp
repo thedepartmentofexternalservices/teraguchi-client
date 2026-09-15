@@ -413,27 +413,44 @@ QString ComputerModel::authenticateAssignedTarget(TailscaleWorkstations* assignm
     return {};
 }
 
+QString ComputerModel::assignedDisplayError(int displays) const
+{
+    return displays == 1 ? QString() : tr("Two-display sessions are not available in this Mac development build. Explicitly select one display to continue.");
+}
+
 Session* ComputerModel::createAssignedSession(TailscaleWorkstations* assignments,
-                                             const QVariantMap& expected)
+                                             const QVariantMap& expected, int displays, const QString& requestId)
 {
 #ifndef TERAGUCHI_STRICT_VIDEO
-    Q_UNUSED(assignments); Q_UNUSED(expected);
+    Q_UNUSED(assignments); Q_UNUSED(expected); Q_UNUSED(displays); Q_UNUSED(requestId);
     return nullptr;
 #else
+    if (!assignedDisplayError(displays).isEmpty()) return nullptr;
     const auto current = assignedLoginTarget(assignments, expected.value(QStringLiteral("id")).toString());
     if (!TeraguchiAssignment::matches(expected, current)) return nullptr;
-    for (auto* computer : m_ComputerManager->getComputers()) {
-        QReadLocker lock(&computer->lock);
-        if (computer->uuid != current.value(QStringLiteral("computerId")).toString() ||
-                computer->authorizationState != NvComputer::AS_AUTHORIZED) continue;
-        for (auto& app : computer->appList) {
-            if (app.name == QStringLiteral("Desktop")) {
-                auto* session = new Session(computer, app, nullptr, m_ComputerManager);
-                session->disableActiveSessionTakeover();
-                return session;
-            }
+    QString username, password;
+    auto computer = m_ComputerManager->takeAssignedAuthentication(requestId, username, password);
+    if (!computer) return nullptr;
+    if (computer->uuid != current.value("computerId").toString() ||
+            computer->serverUuid != current.value("hostId").toString() ||
+            QHostAddress(computer->activeAddress.address()) != QHostAddress(current.value("address").toString())) {
+        password.fill(QChar(0));
+        return nullptr;
+    }
+    for (auto& app : computer->appList) {
+        if (app.name == QStringLiteral("Desktop")) {
+            auto* session = new Session(computer.get(), app);
+            session->bindAssignedTarget(assignments, current, displays);
+            session->setAssignedCredentials(std::move(username), std::move(password));
+            return session;
         }
     }
+    password.fill(QChar(0));
     return nullptr;
 #endif
+}
+
+void ComputerModel::cancelAssignedAuthentication(const QString& requestId)
+{
+    if (m_ComputerManager) m_ComputerManager->cancelAssignedAuthentication(requestId);
 }
