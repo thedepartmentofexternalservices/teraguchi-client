@@ -2,6 +2,7 @@
 #include "streaming/session.h"
 
 #include <QAbstractListModel>
+#include "backend/teraguchi/macdisplaybinding.h"
 #include "backend/teraguchi/tailscaleworkstations.h"
 
 class ComputerModel : public QAbstractListModel
@@ -55,6 +56,9 @@ public:
                                                const QVariantMap& expected, int displays, const QString& requestId);
     Q_INVOKABLE void cancelAssignedAuthentication(const QString& requestId);
     Q_INVOKABLE QString assignedDisplayError(int displays) const;
+    Q_INVOKABLE QVariantMap prepareAssignedDisplays(int displays, QWindow* window);
+    Q_INVOKABLE bool assignedDisplaysCurrent(const QString& token) const;
+    Q_INVOKABLE void cancelAssignedDisplays(const QString& token);
     Q_INVOKABLE bool assignedInputPermissionsReady() const;
 
     Q_INVOKABLE int plankScalingChoice(int computerIndex) const;
@@ -95,6 +99,9 @@ private slots:
     void handleAuthenticationCompleted(NvComputer* computer, QString error);
 
 private:
+    MacDisplayBinding::Selection m_AssignedDisplays;
+    QString m_DisplayToken;
+    QHash<QString, QString> m_AuthenticationDisplays;
     QVector<NvComputer*> m_Computers;
     ComputerManager* m_ComputerManager = nullptr;
 };

@@ -889,7 +889,7 @@ void PlankToolbar::redraw()
 
     // Four corners point outward when entering fullscreen and inward when the
     // next click will restore the decorated window.
-    const bool isFullscreen =
+    const bool isFullscreen = m_PresentationFullscreen ||
             (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN) != 0;
     const qreal outer = 6.0 * WindowGlyphScale;
     const qreal inner = 2.0 * WindowGlyphScale;

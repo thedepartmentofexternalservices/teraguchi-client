@@ -37,6 +37,7 @@ public:
 
     void setStreamDimensions(int streamWidth, int streamHeight);
 
+    void setPresentationFullscreen(bool fullscreen) { m_PresentationFullscreen = fullscreen; }
     void setPresentationLayout(const PlankPresentationLayout& layout);
 
     void refreshWaylandTabletCursorParents();
@@ -128,6 +129,7 @@ private:
 
     void performSpecialKeyCombo(KeyCombo combo);
 
+    bool m_PresentationFullscreen = false;
     SDL_Window* m_Window;
     PlankPresentationLayout m_PresentationLayout;
     bool m_NeedsManualCaptureOnLeave;

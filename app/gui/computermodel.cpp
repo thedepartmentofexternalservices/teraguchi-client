@@ -1,3 +1,4 @@
+#include <QScreen>
 #include "computermodel.h"
 #include "backend/relaywakeclient.h"
 #include "backend/teraguchi/assignmenttarget.h"
@@ -392,7 +393,10 @@ QString ComputerModel::authenticateAssignedTarget(TailscaleWorkstations* assignm
                                                const QVariantMap& expected,
                                                QString username, QString password)
 {
-    if (!assignedInputPermissionsReady()) { password.fill(QChar(0)); return {}; }
+    const auto displayToken = expected.value(QStringLiteral("displayToken")).toString();
+    if (!assignedInputPermissionsReady() || !assignedDisplaysCurrent(displayToken)) {
+        password.fill(QChar(0)); return {};
+    }
     const auto current = assignedLoginTarget(assignments, expected.value(QStringLiteral("id")).toString());
     if (!TeraguchiAssignment::matches(expected, current)) {
         password.fill(QChar('\0'));
@@ -406,6 +410,7 @@ QString ComputerModel::authenticateAssignedTarget(TailscaleWorkstations* assignm
             if (QHostAddress(address.address()) != QHostAddress(current.value(QStringLiteral("address")).toString())) return {};
             // Use PLANK's existing TLS/PAM path with an explicit endpoint/identity.
             const auto requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_AuthenticationDisplays.insert(requestId, displayToken);
             m_ComputerManager->authenticateHost(computer, std::move(username), std::move(password),
                                                  address, current.value(QStringLiteral("hostId")).toString(), requestId);
             return requestId;
@@ -422,7 +427,41 @@ bool ComputerModel::assignedInputPermissionsReady() const
 
 QString ComputerModel::assignedDisplayError(int displays) const
 {
-    return displays == 1 ? QString() : tr("Two-display sessions are not available in this Mac development build. Explicitly select one display to continue.");
+    return displays == 1 || displays == 2 ? QString() : tr("Select one or two displays.");
+}
+
+QVariantMap ComputerModel::prepareAssignedDisplays(int displays, QWindow* window)
+{
+    m_DisplayToken.clear();
+    m_AssignedDisplays = {};
+    const auto error = assignedDisplayError(displays);
+    if (!error.isEmpty()) return {{QStringLiteral("error"), error}};
+    if (window && window->screen())
+        m_AssignedDisplays = MacDisplayBinding::select(MacDisplayBinding::read(), window->screen()->geometry(), displays);
+    if (m_AssignedDisplays.outputs.size() != displays)
+        return {{QStringLiteral("error"), tr("The selected displays cannot be bound. Use independent, unrotated displays arranged side by side, then try again.")}};
+    QVector<NvClientDisplay> outputs;
+    for (const auto& display : m_AssignedDisplays.outputs) outputs.append({display.bounds, display.nativePixels});
+    QString layout, reason;
+    QStringList modes;
+    if (!NvOutputTopology::resolveClientDisplayLayout(outputs, layout, modes, &reason)) {
+        m_AssignedDisplays = {};
+        return {{QStringLiteral("error"), reason}};
+    }
+    m_DisplayToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    return {{QStringLiteral("token"), m_DisplayToken}};
+}
+
+bool ComputerModel::assignedDisplaysCurrent(const QString& token) const
+{
+    return !token.isEmpty() && token == m_DisplayToken && MacDisplayBinding::current(m_AssignedDisplays);
+}
+
+void ComputerModel::cancelAssignedDisplays(const QString& token)
+{
+    if (token != m_DisplayToken) return;
+    m_DisplayToken.clear();
+    m_AssignedDisplays = {};
 }
 
 Session* ComputerModel::createAssignedSession(TailscaleWorkstations* assignments,
@@ -432,7 +471,11 @@ Session* ComputerModel::createAssignedSession(TailscaleWorkstations* assignments
     Q_UNUSED(assignments); Q_UNUSED(expected); Q_UNUSED(displays); Q_UNUSED(requestId);
     return nullptr;
 #else
-    if (!assignedInputPermissionsReady() || !assignedDisplayError(displays).isEmpty()) return nullptr;
+    const auto displayToken = expected.value(QStringLiteral("displayToken")).toString();
+    if (!assignedInputPermissionsReady() || !assignedDisplayError(displays).isEmpty() ||
+            !assignedDisplaysCurrent(displayToken) || m_AssignedDisplays.outputs.size() != displays ||
+            m_AuthenticationDisplays.value(requestId) != displayToken) return nullptr;
+    m_AuthenticationDisplays.remove(requestId);
     const auto current = assignedLoginTarget(assignments, expected.value(QStringLiteral("id")).toString());
     if (!TeraguchiAssignment::matches(expected, current)) return nullptr;
     QString username, password;
@@ -448,6 +491,7 @@ Session* ComputerModel::createAssignedSession(TailscaleWorkstations* assignments
         if (app.name == QStringLiteral("Desktop")) {
             auto* session = new Session(computer.get(), app);
             session->bindAssignedTarget(assignments, current, displays);
+            session->bindAssignedDisplays(m_AssignedDisplays);
             session->setAssignedCredentials(std::move(username), std::move(password));
             return session;
         }
@@ -459,5 +503,6 @@ Session* ComputerModel::createAssignedSession(TailscaleWorkstations* assignments
 
 void ComputerModel::cancelAssignedAuthentication(const QString& requestId)
 {
+    m_AuthenticationDisplays.remove(requestId);
     if (m_ComputerManager) m_ComputerManager->cancelAssignedAuthentication(requestId);
 }

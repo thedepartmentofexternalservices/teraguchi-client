@@ -4,6 +4,7 @@
 #include "video/teraguchivideo.h"
 #ifdef Q_OS_MACOS
 #include "input/macpen.h"
+#include "macpresentationwindows.h"
 #endif
 #include "streaming/clientframeflowtrace.h"
 #include "backend/hostrecovery.h"
@@ -857,6 +858,8 @@ void Session::bindAssignedTarget(TailscaleWorkstations* provider, const QVariant
 void Session::validateAssignedEndpoint()
 {
     if (!m_AssignmentWatch) return;
+    if (!MacDisplayBinding::current(m_AssignedDisplays))
+        throw GfeHttpResponseException(401, "Selected displays changed; start a new connection");
     if (!MacInputAccess::query().ready())
         throw GfeHttpResponseException(401, "Mac input permissions changed; check Accessibility and Input Monitoring");
     if (m_DisconnectRequested.load() || !m_AssignmentWatch->permitsConnection())
@@ -1961,7 +1964,8 @@ private:
 
 int Session::getTargetDisplayIndex() const
 {
-    int displayIndex = m_AssignedDisplayCount ? -1 : 0;
+    if (m_AssignedDisplayCount) return StreamUtils::getDisplayIndex(m_TargetDisplayId);
+    int displayIndex = 0;
 
     if (m_Window != nullptr) {
         displayIndex = StreamUtils::getDisplayIndex(SDL_GetDisplayForWindow(m_Window));
@@ -2013,18 +2017,69 @@ int Session::getTargetDisplayIndex() const
     return displayIndex;
 }
 
+bool Session::usesMacOutputPair() const
+{
+#ifdef Q_OS_MACOS
+    return m_AssignedDisplayCount == 2;
+#else
+    return false;
+#endif
+}
+
+bool Session::assignedWindowsCurrent() const
+{
+    if (!m_AssignedDisplayCount) return true;
+    if (m_ClientDisplays.size() != m_AssignedDisplayCount ||
+            m_SecondaryWindows.size() != m_AssignedDisplayCount - 1) return false;
+    int secondary = 0;
+    for (const auto& display : m_ClientDisplays) {
+        auto* window = display.displayId == m_TargetDisplayId ? m_Window : m_SecondaryWindows.value(secondary++, nullptr);
+        SDL_Rect bounds;
+        if (!window || !SDL_GetDisplayBounds(display.displayId, &bounds) ||
+                SDL_GetDisplayForWindow(window) != display.displayId ||
+                bounds.x != display.logicalBounds.x || bounds.y != display.logicalBounds.y ||
+                bounds.w != display.logicalBounds.w || bounds.h != display.logicalBounds.h) return false;
+        if (usesMacOutputPair() && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN)) return false;
+    }
+    return true;
+}
+
 bool Session::snapshotClientDisplays()
 {
     m_ClientDisplays.clear();
-    // The Mac renderer currently presents one output. Never make a two-display
-    // request look successful by compressing it into that one surface.
-    if (m_AssignedDisplayCount != 0 && m_AssignedDisplayCount != 1) {
-        emit displayLaunchError(tr("Two-display sessions are not available in this Mac development build. Explicitly select one display to continue."));
-        return false;
-    }
-    if (m_AssignedDisplayCount && (!m_QtWindow || !m_QtWindow->screen())) {
-        emit displayLaunchError(tr("The selected client display is unavailable."));
-        return false;
+    if (m_AssignedDisplayCount) {
+        if (m_AssignedDisplays.outputs.size() != m_AssignedDisplayCount ||
+                !MacDisplayBinding::current(m_AssignedDisplays)) {
+            emit displayLaunchError(tr("The selected displays changed. Start a new connection after checking them."));
+            return false;
+        }
+        m_TargetDisplayId = 0;
+        int canvasX = 0;
+        QVector<MacDisplayBinding::Surface> surfaces;
+        for (int i = 0; i < StreamUtils::getDisplayCount(); ++i) {
+            SDL_Rect bounds;
+            const auto id = StreamUtils::getDisplayId(i);
+            if (!SDL_GetDisplayBounds(id, &bounds)) return false;
+            surfaces.append({id, QRect(bounds.x, bounds.y, bounds.w, bounds.h)});
+        }
+        const auto resolved = MacDisplayBinding::resolve(m_AssignedDisplays, surfaces);
+        if (resolved.size() != m_AssignedDisplayCount) {
+            emit displayLaunchError(tr("A selected display is unavailable to the streaming window."));
+            return false;
+        }
+        for (int i = 0; i < m_AssignedDisplayCount; ++i) {
+            const auto& selected = m_AssignedDisplays.outputs[i];
+            ClientDisplaySnapshot snapshot;
+            snapshot.displayId = resolved[i];
+            snapshot.logicalBounds = {selected.bounds.x(), selected.bounds.y(), selected.bounds.width(), selected.bounds.height()};
+            snapshot.nativeSize = selected.nativePixels;
+            snapshot.canvasRect = QRect(canvasX, 0, selected.nativePixels.width(), selected.nativePixels.height());
+            canvasX += selected.nativePixels.width();
+            if (selected.id == m_AssignedDisplays.primary) m_TargetDisplayId = snapshot.displayId;
+            m_ClientDisplays.append(snapshot);
+        }
+        m_UseMultiDisplayPresentation = m_AssignedDisplayCount == 2;
+        return m_TargetDisplayId && MacDisplayBinding::current(m_AssignedDisplays);
     }
     const int targetIndex = getTargetDisplayIndex();
     if (targetIndex < 0) { emit displayLaunchError(tr("The selected client display is unavailable.")); return false; }
@@ -2121,8 +2176,13 @@ void Session::rebuildPresentationLayout()
         return;
     }
 
+    if (usesMacOutputPair() && m_SecondaryWindows.size() != 1) {
+        requestDisconnect();
+        emit displayLaunchError(tr("The second presentation window is unavailable."));
+        return;
+    }
     const bool multiOutputActive = m_UseMultiDisplayPresentation &&
-            m_PresentationFullscreen && !m_SecondaryWindows.isEmpty();
+            (m_PresentationFullscreen || usesMacOutputPair()) && !m_SecondaryWindows.isEmpty();
     if (multiOutputActive) {
         int canvasWidth = 0;
         int canvasHeight = 0;
@@ -2254,6 +2314,36 @@ bool Session::anyPresentationWindowFocused() const
 
 void Session::setPresentationWindowsFullscreen(bool fullscreen)
 {
+#ifdef Q_OS_MACOS
+    if (usesMacOutputPair()) {
+        bool placed = m_SecondaryWindows.size() == 1 && MacDisplayBinding::current(m_AssignedDisplays);
+        int secondary = 0;
+        for (const auto& display : m_ClientDisplays) {
+            auto* window = display.displayId == m_TargetDisplayId ? m_Window : m_SecondaryWindows.value(secondary++, nullptr);
+            const auto& bounds = display.logicalBounds;
+            if (!window || !MacPresentationWindows::place(window, display.displayId,
+                        QRect(bounds.x, bounds.y, bounds.w, bounds.h), fullscreen)) placed = false;
+        }
+        if (!placed) {
+            requestDisconnect();
+            emit displayLaunchError(tr("Both selected displays must remain available. The session has stopped."));
+            return;
+        }
+        m_PresentationFullscreen = fullscreen;
+        if (m_InputHandler) m_InputHandler->setPresentationFullscreen(fullscreen);
+        if (m_PlankToolbar) m_PlankToolbar->setPresentationFullscreen(fullscreen);
+        rebuildPresentationLayout();
+        // Place the complete pair before showing either surface.
+        bool shown = true;
+        for (auto* window : m_SecondaryWindows) if (!SDL_ShowWindow(window)) shown = false;
+        if (!SDL_ShowWindow(m_Window)) shown = false;
+        if (!shown) {
+            requestDisconnect();
+            emit displayLaunchError(tr("Unable to show both selected displays. The session has stopped."));
+        }
+        return;
+    }
+#endif
     m_PresentationFullscreen = fullscreen;
     if (!SDL_SetWindowFullscreen(m_Window,
                                  fullscreen ? m_FullScreenFlag : 0)) {
@@ -2311,9 +2401,13 @@ void Session::setPresentationWindowsFullscreen(bool fullscreen)
 
 void Session::minimizePresentationWindows()
 {
-    SDL_MinimizeWindow(m_Window);
+    bool minimized = SDL_MinimizeWindow(m_Window);
     for (SDL_Window* window : m_SecondaryWindows) {
-        SDL_MinimizeWindow(window);
+        if (!SDL_MinimizeWindow(window)) minimized = false;
+    }
+    if (usesMacOutputPair() && !minimized) {
+        requestDisconnect();
+        emit displayLaunchError(tr("Unable to minimize both displays. The session has stopped."));
     }
 }
 
@@ -2557,6 +2651,11 @@ void Session::getWindowDimensions(int& x, int& y,
 
 void Session::updateOptimalWindowDisplayMode()
 {
+    if (m_AssignedDisplayCount) {
+        // The binding includes the current mode; opening a session must not change it.
+        SDL_SetWindowFullscreenMode(m_Window, nullptr);
+        return;
+    }
     // A PLANK Wayland session is a desktop surface, not a monitor
     // mode switch. Let the compositor size the fullscreen surface and keep
     // SDL's window and pointer coordinates in the same space. SDL 3.4.2 can
@@ -2668,7 +2767,7 @@ void Session::updateOptimalWindowDisplayMode()
 
 void Session::toggleFullscreen()
 {
-    bool fullScreen = !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
+    bool fullScreen = usesMacOutputPair() ? !m_PresentationFullscreen : !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
 
     if (m_UseMultiDisplayPresentation) {
         SDL_LockSpinlock(&m_DecoderLock);
@@ -3766,6 +3865,7 @@ void Session::execInternal()
         // viewport before the fullscreen surface exists.
         defaultWindowFlags |= m_FullScreenFlag;
     }
+    if (usesMacOutputPair()) defaultWindowFlags |= SDL_WINDOW_HIDDEN;
     if (presentationMappingDeferred) {
         // Decoder selection can switch the SDL window between OpenGL and
         // Vulkan. SDL implements that switch by recreating the native Wayland
@@ -3840,7 +3940,7 @@ void Session::execInternal()
                                   flags);
             SDL_SetBooleanProperty(properties,
                                    SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN,
-                                   true);
+                                   !usesMacOutputPair());
             SDL_Window* secondary = SDL_CreateWindowWithProperties(properties);
             SDL_DestroyProperties(properties);
             if (secondary == nullptr) {
@@ -3862,10 +3962,11 @@ void Session::execInternal()
                             new DeferredSessionCleanupTask(this));
                 return;
             }
-            SDL_SetWindowFullscreenMode(secondary, nullptr);
-            SDL_SetWindowFullscreen(secondary, true);
-            if (!placeFullscreenWindowOnDisplay(secondary,
-                                                display.displayId)) {
+            if (!usesMacOutputPair()) {
+                SDL_SetWindowFullscreenMode(secondary, nullptr);
+                SDL_SetWindowFullscreen(secondary, true);
+            }
+            if (!usesMacOutputPair() && !placeFullscreenWindowOnDisplay(secondary, display.displayId)) {
                 SDL_DestroyWindow(secondary);
                 emit displayLaunchError(
                     tr("Unable to place the second fullscreen surface on its client monitor."));
@@ -3884,12 +3985,12 @@ void Session::execInternal()
             }
             m_SecondaryWindows.append(secondary);
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Created PLANK Wayland fullscreen surface for output %u",
+                        "Created PLANK presentation surface for output %u",
                         display.displayId);
         }
     }
 
-    if (!m_IsFullScreen) {
+    if (!m_IsFullScreen && !usesMacOutputPair()) {
         // Windowed means a normal compositor-managed desktop window. Do not
         // inherit a maximized launcher state that can make it indistinguishable
         // from borderless mode on Wayland.
@@ -3962,8 +4063,8 @@ void Session::execInternal()
     // for if/when we enter full-screen mode.
     updateOptimalWindowDisplayMode();
 
-    // Enter full screen if requested
-    if (m_IsFullScreen) {
+    // Enter full screen if requested; a Mac pair also places both windowed outputs.
+    if (m_IsFullScreen || usesMacOutputPair()) {
         if (presentationMappingDeferred) {
             // Keep the initial window normally sized and hidden through all
             // graphics-backend probes. Fullscreen is queued immediately before
@@ -3975,7 +4076,7 @@ void Session::execInternal()
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Deferring initial Wayland presentation map until decoder selection completes");
         } else {
-            setPresentationWindowsFullscreen(true);
+            setPresentationWindowsFullscreen(m_IsFullScreen);
         }
     }
 
@@ -4033,6 +4134,7 @@ void Session::execInternal()
             m_PlankToolbar.reset(new PlankToolbar(
                         m_Window, m_OverlayManager, *m_InputHandler,
                         *m_Preferences, m_PlankBitrateKbps));
+            if (usesMacOutputPair()) m_PlankToolbar->setPresentationFullscreen(m_PresentationFullscreen);
         }
     };
     if (!presentationMappingDeferred) {
@@ -4101,8 +4203,7 @@ void Session::execInternal()
         }
 #endif
         if (m_DisconnectRequested.load()) goto DispatchDeferredCleanup;
-        if (m_AssignedDisplayCount && (StreamUtils::getDisplayIndex(m_TargetDisplayId) < 0 ||
-                SDL_GetDisplayForWindow(m_Window) != m_TargetDisplayId)) {
+        if (!assignedWindowsCurrent()) {
             emit displayLaunchError(tr("The selected display changed or became unavailable. Check your display before starting another session."));
             goto DispatchDeferredCleanup;
         }
@@ -4119,6 +4220,11 @@ void Session::execInternal()
         const Uint64 now = SDL_GetTicks();
         if (m_AssignedDisplayCount && now >= nextPermissionCheck) {
             nextPermissionCheck = now + 2000;
+            if (!MacDisplayBinding::current(m_AssignedDisplays)) {
+                requestDisconnect();
+                emit displayLaunchError(tr("The selected displays changed. The session has closed to release held input. Check your displays, then reconnect."));
+                goto DispatchDeferredCleanup;
+            }
             if (!MacInputAccess::query().ready()) {
                 emit displayLaunchError(tr("Mac input permissions changed. The session has closed to release held input. Check Accessibility and Input Monitoring, then reconnect."));
                 goto DispatchDeferredCleanup;
@@ -4233,6 +4339,48 @@ void Session::execInternal()
             } else {
                 continue;
             }
+        }
+
+        if (!assignedWindowsCurrent()) {
+            requestDisconnect();
+            emit displayLaunchError(tr("A presentation window left its selected display. The session has stopped."));
+            goto DispatchDeferredCleanup;
+        }
+        if (m_AssignedDisplayCount && event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
+                windowForEvent(event.window.windowID)) {
+            requestDisconnect();
+            goto DispatchDeferredCleanup;
+        }
+        if (usesMacOutputPair() && (event.type == SDL_EVENT_WINDOW_MINIMIZED ||
+                event.type == SDL_EVENT_WINDOW_RESTORED)) {
+            auto* source = windowForEvent(event.window.windowID);
+            if (source) {
+                const bool minimized = SDL_GetWindowFlags(source) & SDL_WINDOW_MINIMIZED;
+                if (minimized == (event.type == SDL_EVENT_WINDOW_MINIMIZED)) {
+                    for (auto* window : {m_Window, m_SecondaryWindows.value(0, nullptr)}) {
+                        if (window && bool(SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != minimized) {
+                            if (!(minimized ? SDL_MinimizeWindow(window) : SDL_RestoreWindow(window))) {
+                                requestDisconnect();
+                                emit displayLaunchError(tr("Unable to keep both presentation windows together. The session has stopped."));
+                                goto DispatchDeferredCleanup;
+                            }
+                        }
+                    }
+                    if (minimized) m_InputHandler->notifyFocusLost();
+                }
+            }
+        }
+        if (usesMacOutputPair() && event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED &&
+                windowForEvent(event.window.windowID)) {
+            SDL_Event resetEvent = {};
+            resetEvent.type = SDL_EVENT_RENDER_DEVICE_RESET;
+            SDL_PushEvent(&resetEvent);
+        }
+        if (m_AssignedDisplayCount && event.type >= SDL_EVENT_DISPLAY_FIRST && event.type <= SDL_EVENT_DISPLAY_LAST &&
+                !MacDisplayBinding::current(m_AssignedDisplays)) {
+            requestDisconnect();
+            emit displayLaunchError(tr("The selected displays changed. Start a new connection after checking them."));
+            goto DispatchDeferredCleanup;
         }
 
 #ifdef Q_OS_MACOS
@@ -4453,10 +4601,15 @@ void Session::execInternal()
                 needsFirstEnterCapture = false;
             }
 
-            // Secondary Vulkan swapchains resize themselves during the next
-            // frame. Only the primary window participates in decoder and
-            // toolbar lifecycle decisions.
+            // Vulkan secondaries resize themselves. Metal recreates the pair
+            // when either surface changes; toolbar ownership stays primary.
             if (eventWindow != m_Window) {
+                if (usesMacOutputPair() && (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+                        event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED || event.type == SDL_EVENT_WINDOW_SHOWN)) {
+                    SDL_Event resetEvent = {};
+                    resetEvent.type = SDL_EVENT_RENDER_DEVICE_RESET;
+                    SDL_PushEvent(&resetEvent);
+                }
                 break;
             }
 

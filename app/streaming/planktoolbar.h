@@ -50,6 +50,8 @@ public:
 
     int eventWaitTimeout() const;
 
+    void setPresentationFullscreen(bool fullscreen) { m_PresentationFullscreen = fullscreen; notifyWindowChanged(); }
+
 private:
     enum class Control {
         None,
@@ -96,6 +98,7 @@ private:
     int sliderLeft() const;
     int sliderRight() const;
 
+    bool m_PresentationFullscreen = false;
     SDL_Window* m_Window;
     Overlay::OverlayManager& m_OverlayManager;
     SdlInputHandler& m_InputHandler;

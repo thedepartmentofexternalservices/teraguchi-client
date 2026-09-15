@@ -6,6 +6,8 @@ QtObject {
     id: login
     required property TailscaleAssignments assignments
     required property QtObject computers
+    property var presentationWindow: null
+    property string displayToken: ""
     property var target: null
     property int token: -1
     property string requestId: ""
@@ -32,14 +34,21 @@ QtObject {
         var resolved = computers.assignedLoginTarget(assignments.provider, preparingNodeId);
         if (!resolved || !resolved.computerId || !resolved.hostId) return;
         target = resolved;
+        target.displayToken = displayToken;
         preparingNodeId = "";
         preparationTimer.stop();
         if (!current()) { cancel(); return; }
-        if (permissionsReady()) credentialsRequested(token);
+        if (displaysReady() && permissionsReady()) credentialsRequested(token);
     }
     signal credentialsRequested(int token)
     signal sessionPrepared(int token, var session)
 
+    function displaysReady() {
+        if (computers.assignedDisplaysCurrent(displayToken)) return true;
+        assignments.flow.block(qsTr("Selected displays unavailable"), qsTr("Your selected displays changed. Check their arrangement and start a new connection."));
+        cancel();
+        return false;
+    }
     function current() {
         return target !== null && assignments.targetStillCurrent(token, target.id, target.address, target.identity);
     }
@@ -47,6 +56,8 @@ QtObject {
         // Retire both the callback and the request-scoped native result.
         // In-flight PAM may finish, but its credentials cannot be retained.
         if (requestId) computers.cancelAssignedAuthentication(requestId);
+        if (displayToken) computers.cancelAssignedDisplays(displayToken);
+        displayToken = "";
         preparationTimer.stop();
         preparingNodeId = "";
         target = null;
@@ -56,7 +67,7 @@ QtObject {
     function submit(expectedToken, username, password) {
         if (expectedToken !== token || !current() || requestId !== "")
             return false;
-        if (!permissionsReady()) return false;
+        if (!displaysReady() || !permissionsReady()) return false;
         requestId = computers.authenticateAssignedTarget(assignments.provider, target, username, password);
         if (!requestId) {
             assignments.flow.acceptCheck(token, {outcome: "unknown"});
@@ -69,11 +80,12 @@ QtObject {
         target: login.assignments
         function onLoginRequested(token, nodeId, address, identity, displays, resume) {
             login.cancel();
-            var displayError = login.computers.assignedDisplayError(displays);
-            if (displayError) {
-                login.assignments.flow.block(qsTr("Selected displays unavailable"), displayError);
+            var selection = login.computers.prepareAssignedDisplays(displays, login.presentationWindow);
+            if (!selection.token) {
+                login.assignments.flow.block(qsTr("Selected displays unavailable"), selection.error);
                 return;
             }
+            login.displayToken = selection.token;
             login.token = token;
             if (!login.permissionsReady()) return;
             login.preparingNodeId = nodeId;
@@ -105,7 +117,7 @@ QtObject {
                 login.cancel();
                 return;
             }
-            if (!login.permissionsReady()) return;
+            if (!login.displaysReady() || !login.permissionsReady()) return;
             var session = login.computers.createAssignedSession(login.assignments.provider, login.target, login.assignments.flow.attemptDisplays, login.requestId);
             if (!session) {
                 login.assignments.flow.acceptCheck(login.token, {outcome: "unknown"});

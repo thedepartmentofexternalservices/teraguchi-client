@@ -658,3 +658,10 @@ HEADERS += backend/teraguchi/assignmentwatch.h
 SOURCES += backend/teraguchi/assignmentwatch.cpp
 HEADERS += backend/teraguchi/tailscaleworkstations.h
 SOURCES += backend/teraguchi/tailscaleworkstations.cpp
+
+HEADERS += backend/teraguchi/macdisplaybinding.h
+SOURCES += backend/teraguchi/macdisplaybinding.cpp
+macx: LIBS += -framework ColorSync
+
+HEADERS += streaming/macpresentationwindows.h
+macx: OBJECTIVE_SOURCES += streaming/macpresentationwindows.mm

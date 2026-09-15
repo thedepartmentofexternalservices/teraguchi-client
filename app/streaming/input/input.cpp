@@ -712,7 +712,7 @@ void SdlInputHandler::updateKeyboardGrabState()
     if (shouldGrab) {
         Uint32 windowFlags = SDL_GetWindowFlags(m_Window);
         if (m_CaptureSystemKeysMode == StreamingPreferences::CSK_FULLSCREEN &&
-            !(windowFlags & SDL_WINDOW_FULLSCREEN)) {
+            !(windowFlags & SDL_WINDOW_FULLSCREEN) && !m_PresentationFullscreen) {
             // Ungrab if it's fullscreen only and we left fullscreen
             shouldGrab = false;
         }
@@ -754,7 +754,7 @@ bool SdlInputHandler::isSystemKeyCaptureActive()
     // configured the compositor to pass through system keys to us anyway.
     // See issues #1776 and #1900 for details.
     bool focused = false;
-    bool fullscreen = false;
+    bool fullscreen = m_PresentationFullscreen;
     for (const auto& output : m_PresentationLayout.outputs) {
         const Uint32 windowFlags = SDL_GetWindowFlags(output.window);
         focused = focused || (windowFlags & SDL_WINDOW_INPUT_FOCUS);

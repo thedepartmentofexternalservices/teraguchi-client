@@ -70,6 +70,7 @@ ApplicationWindow {
         id: loginBridge
         assignments: assignmentBridge
         computers: computerCatalog
+        presentationWindow: window
         onSessionPrepared: function(token, session) { sessionRuntime.prepare(token, session); }
         onTokenChanged: if (token < 0) permissionGate.refresh()
     }
@@ -123,7 +124,7 @@ ApplicationWindow {
             Layout.margins: 12
             Layout.fillWidth: true
             wrapMode: Text.Wrap
-            text: sessionRuntime.pending && !workstationFlow.busy && !workstationFlow.sessionOpen ? qsTr("Session cleanup must finish before another connection can start.") : qsTr("One display uses the screen containing this window. Move this window to choose a different screen. Two-display Mac support is still in development.")
+            text: sessionRuntime.pending && !workstationFlow.busy && !workstationFlow.sessionOpen ? qsTr("Session cleanup must finish before another connection can start.") : qsTr("Displays are selected when you connect. One uses this window’s screen; two requires exactly two independent screens arranged side by side.")
         }
     }
     MacPermissionsDialog { id: permissionDialog; permissions: inputPermissions }

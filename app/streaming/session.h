@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QSemaphore>
+#include "backend/teraguchi/macdisplaybinding.h"
 #include <QSize>
 #include <QStringList>
 #include <QVector>
@@ -136,6 +137,7 @@ public:
 
     Q_INVOKABLE void cancelConnectionStart();
     Q_INVOKABLE void requestDisconnect();
+    void bindAssignedDisplays(const MacDisplayBinding::Selection& selection) { m_AssignedDisplays = selection; }
     void bindAssignedTarget(TailscaleWorkstations* provider, const QVariantMap& target, int displays);
     void setAssignedCredentials(QString username, QString password);
 
@@ -283,6 +285,8 @@ private:
     int getTargetDisplayIndex() const;
 
     bool snapshotClientDisplays();
+    bool usesMacOutputPair() const;
+    bool assignedWindowsCurrent() const;
 
     void rebuildPresentationLayout();
 
@@ -394,6 +398,7 @@ private:
     NvComputer* m_Computer;
     std::unique_ptr<NvComputer> m_AssignedComputer;
     std::unique_ptr<AssignmentWatch> m_AssignmentWatch;
+    MacDisplayBinding::Selection m_AssignedDisplays;
     int m_AssignedDisplayCount = 0;
     std::atomic_bool m_DisconnectRequested{false};
     bool m_PresentationReady = false;
