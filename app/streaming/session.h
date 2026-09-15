@@ -136,6 +136,9 @@ public:
 
     Q_INVOKABLE void respondToActiveSessionTakeover(bool takeOver);
 
+    // Assigned artist sessions cannot offer or perform takeover.
+    void disableActiveSessionTakeover() { m_AllowActiveSessionTakeover = false; }
+
     static
     void getDecoderInfo(SDL_Window* window,
                         bool& isHardwareAccelerated, bool& isFullScreenOnly,
@@ -421,6 +424,7 @@ private:
     std::atomic_bool m_CanReconnect;
     std::atomic_bool m_ConnectionStartCancelled;
     std::atomic_bool m_WaitingForSessionCleanup;
+    bool m_AllowActiveSessionTakeover = true;
     std::atomic_bool m_WaitingForActiveSessionTakeoverDecision {false};
     std::atomic_int m_ActiveSessionTakeoverDecision {0};
     QString m_PlankUsername;

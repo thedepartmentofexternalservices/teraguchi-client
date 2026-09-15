@@ -28,7 +28,7 @@ Rectangle {
     readonly property bool powerEnabled: studioPower !== null && studioPower.enabled === true
     readonly property var powerReport: reportFor(flow.selectedId)
     readonly property bool powerVisible: powerEnabled && flow.selected !== null && flow.selected.status === "offline" && !flow.sessionOpen && !flow.busy
-    readonly property bool canRequestPower: powerVisible && studioPower.pending !== true && powerReport.fresh === true && powerReport.startAllowed === true && ["off", "standby"].indexOf(powerReport.state) >= 0
+    readonly property bool canRequestPower: powerVisible && flow.catalogFresh && !flow.catalogRefreshing && studioPower.pending !== true && powerReport.fresh === true && powerReport.startAllowed === true && ["off", "standby"].indexOf(powerReport.state) >= 0
 
     function reportFor(id) {
         // Reading revision makes adapter report updates observable in QML.
@@ -39,6 +39,8 @@ Rectangle {
         return report && report.workstationId === id ? report : ({});
     }
     function workstationStatus(host) {
+        if (!flow.catalogFresh)
+            return qsTr("Needs refresh");
         return powerEnabled && host.status === "offline" ? powerLabel(reportFor(host.id)) : statusText(host.status);
     }
     function powerLabel(report) {
@@ -56,7 +58,7 @@ Rectangle {
     }
     function requestPower() {
         // Recheck the selected stable ID and current presentation policy at click.
-        if (canRequestPower)
+        if (flow.catalogIsCurrent() && canRequestPower)
             studioPower.requestStart(flow.selectedId);
     }
     function powerDescription() {
@@ -98,6 +100,8 @@ Rectangle {
         return qsTr("Refresh to check whether this workstation is available.");
     }
     function heading() {
+        if (!flow.sessionOpen && !flow.catalogFresh)
+            return flow.catalogRefreshing ? qsTr("Refreshing workstations") : qsTr("Refresh your assignments");
         if (powerVisible)
             return flow.selected.name;
         if (flow.phase === "checking")
@@ -113,6 +117,8 @@ Rectangle {
         return flow.selected ? flow.selected.name : flow.workstations.length === 0 ? qsTr("Your workstation will appear here") : qsTr("Choose a workstation");
     }
     function description() {
+        if (flow.phase !== "connected" && !flow.catalogFresh)
+            return flow.catalogRefreshing ? qsTr("Checking your current workstation assignments.") : flow.catalogProblem || qsTr("Refresh before connecting. Your previous workstation list is shown until it can be checked.");
         if (powerVisible)
             return powerDescription();
         if (flow.phase === "checking")
@@ -158,8 +164,8 @@ Rectangle {
                 }
                 TeraguchiButton {
                     objectName: "refreshButton"
-                    text: qsTr("Refresh")
-                    enabled: !flow.busy && !flow.sessionOpen && !(page.powerEnabled && page.studioPower.pending)
+                    text: flow.catalogRefreshing ? qsTr("Refreshing…") : qsTr("Refresh")
+                    enabled: !flow.catalogRefreshing && !flow.busy && !(page.powerEnabled && page.studioPower.pending)
                     onClicked: {
                         flow.refresh();
                         if (page.powerEnabled && flow.selected && !page.studioPower.pending)
@@ -336,10 +342,10 @@ Rectangle {
                                 width: 6
                                 height: 6
                                 radius: 3
-                                color: flow.selected && flow.selected.status === "ready" ? theme.available : theme.muted
+                                color: flow.catalogFresh && flow.selected && flow.selected.status === "ready" ? theme.available : theme.muted
                             }
                             Label {
-                                text: page.powerVisible ? page.powerLabel(page.powerReport) : flow.selected ? page.statusText(flow.selected.status) : ""
+                                text: flow.selected ? page.workstationStatus(flow.selected) : ""
                                 color: theme.muted
                                 font.pixelSize: 12
                             }
@@ -380,7 +386,7 @@ Rectangle {
                         visible: flow.phase === "interrupted" || (flow.phase === "blocked" && flow.resumeAttempt)
                         text: qsTr("Reconnect")
                         primary: true
-                        enabled: flow.selected !== null && flow.selected.status === "ready"
+                        enabled: flow.catalogFresh && !flow.catalogRefreshing && flow.selected !== null && flow.selected.status === "ready"
                         onClicked: flow.begin(true)
                     }
                     TeraguchiButton {

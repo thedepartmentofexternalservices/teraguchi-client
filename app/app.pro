@@ -649,3 +649,7 @@ isEmpty(PLANK_VERSION) {
 }
 VERSION = "$$section(PLANK_VERSION, -, 0, 0)"
 DEFINES += PLANK_VERSION_STR=\\\"$$PLANK_VERSION\\\"
+
+# Local Tailscale discovery is independent of the transport and credentials.
+HEADERS += backend/teraguchi/tailscaleworkstations.h
+SOURCES += backend/teraguchi/tailscaleworkstations.cpp

@@ -1,3 +1,4 @@
+#include "backend/teraguchi/tailscaleworkstations.h"
 #include <QGuiApplication>
 #include <QStyleHints>
 #include <QQmlApplicationEngine>
@@ -910,6 +911,7 @@ int main(int argc, char *argv[])
     app.setDesktopFileName("la.instinctual.Plank.Client");
 
     // Register our C++ types for QML
+    qmlRegisterType<TailscaleWorkstations>("TailscaleWorkstations", 1, 0, "TailscaleWorkstations");
     qmlRegisterType<ComputerModel>("ComputerModel", 1, 0, "ComputerModel");
     qmlRegisterUncreatableType<Session>("Session", 1, 0, "Session", "Session cannot be created from QML");
     qmlRegisterSingletonType<ComputerManager>("ComputerManager", 1, 0,

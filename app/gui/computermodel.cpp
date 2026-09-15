@@ -1,8 +1,10 @@
 #include "computermodel.h"
 #include "backend/relaywakeclient.h"
+#include "backend/teraguchi/assignmenttarget.h"
 #include "settings/plankclientpolicy.h"
 
 #include <utility>
+#include <QUuid>
 
 namespace {
 QString hostLayoutFromChoice(int choice)
@@ -33,6 +35,8 @@ void ComputerModel::initialize(ComputerManager* computerManager)
     connect(m_ComputerManager, &ComputerManager::authenticationCompleted,
             this, &ComputerModel::handleAuthenticationCompleted);
 
+    connect(m_ComputerManager, &ComputerManager::assignedAuthenticationCompleted,
+            this, &ComputerModel::assignedAuthenticationCompleted);
     m_Computers = m_ComputerManager->getComputers();
 }
 
@@ -337,4 +341,99 @@ void ComputerModel::handleComputerStateChanged(NvComputer* computer)
         int index = m_Computers.indexOf(computer);
         emit dataChanged(createIndex(index, 0), createIndex(index, 0));
     }
+}
+
+bool ComputerModel::prepareAssignedTarget(TailscaleWorkstations* assignments, const QString& nodeId)
+{
+    if (!assignments || !m_ComputerManager) return false;
+    const auto peer = assignments->resolve(nodeId);
+    if (peer.isEmpty()) return false;
+    const QString address = peer.value(QStringLiteral("address")).toString();
+    for (auto* computer : m_ComputerManager->getComputers()) {
+        QReadLocker lock(&computer->lock);
+        if (computer->manualBookmark && QHostAddress(computer->manualAddress.address()) == QHostAddress(address))
+            return true; // Existing choices and pins are never overwritten by discovery.
+    }
+    // Runs only after the artist selects Connect. The normal poller verifies
+    // PLANK metadata before assignedLoginTarget will expose a credential target.
+    m_ComputerManager->addNewHostManually(address, peer.value(QStringLiteral("name")).toString(),
+            0, 9, 1, 1, StreamingPreferences::PLANK_PROFILE_NVENC_HEVC_10BIT_444,
+            StreamingPreferences::PLANK_CAPTURE_X11_NATIVE10);
+    return true;
+}
+
+QVariantMap ComputerModel::assignedLoginTarget(TailscaleWorkstations* assignments,
+                                              const QString& nodeId) const
+{
+    if (!assignments || !m_ComputerManager) return {};
+    auto peer = assignments->resolve(nodeId);
+    if (peer.isEmpty()) return {};
+    const QHostAddress address(peer.value(QStringLiteral("address")).toString());
+    QVariantMap found;
+    // Resolve against the current manager, independent of cached view ordering.
+    for (auto* computer : m_ComputerManager->getComputers()) {
+        QReadLocker lock(&computer->lock);
+        if (!computer->manualBookmark || computer->state != NvComputer::CS_ONLINE ||
+                !computer->plankAuthentication || computer->plankHostMetadataVersion < 1 ||
+                NvOutputTopology::hostPlatform(computer->plankTopologyVersion, computer->plankFeatureFlags) != 1 ||
+                computer->serverUuid.isEmpty() ||
+                QHostAddress(computer->manualAddress.address()) != address ||
+                computer->activeAddress != computer->manualAddress) continue;
+        if (!found.isEmpty()) return {}; // Ambiguous endpoints must be resolved by setup.
+        found = peer;
+        found.insert(QStringLiteral("computerId"), computer->uuid);
+        found.insert(QStringLiteral("hostId"), computer->serverUuid);
+    }
+    return found;
+}
+
+QString ComputerModel::authenticateAssignedTarget(TailscaleWorkstations* assignments,
+                                               const QVariantMap& expected,
+                                               QString username, QString password)
+{
+    const auto current = assignedLoginTarget(assignments, expected.value(QStringLiteral("id")).toString());
+    if (!TeraguchiAssignment::matches(expected, current)) {
+        password.fill(QChar('\0'));
+        return {};
+    }
+    for (auto* computer : m_ComputerManager->getComputers()) {
+        NvAddress address;
+        QString id;
+        { QReadLocker lock(&computer->lock); id = computer->uuid; address = computer->activeAddress; }
+        if (id == current.value(QStringLiteral("computerId")).toString()) {
+            if (QHostAddress(address.address()) != QHostAddress(current.value(QStringLiteral("address")).toString())) return {};
+            // Use PLANK's existing TLS/PAM path with an explicit endpoint/identity.
+            const auto requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_ComputerManager->authenticateHost(computer, std::move(username), std::move(password),
+                                                 address, current.value(QStringLiteral("hostId")).toString(), requestId);
+            return requestId;
+        }
+    }
+    password.fill(QChar('\0'));
+    return {};
+}
+
+Session* ComputerModel::createAssignedSession(TailscaleWorkstations* assignments,
+                                             const QVariantMap& expected)
+{
+#ifndef TERAGUCHI_STRICT_VIDEO
+    Q_UNUSED(assignments); Q_UNUSED(expected);
+    return nullptr;
+#else
+    const auto current = assignedLoginTarget(assignments, expected.value(QStringLiteral("id")).toString());
+    if (!TeraguchiAssignment::matches(expected, current)) return nullptr;
+    for (auto* computer : m_ComputerManager->getComputers()) {
+        QReadLocker lock(&computer->lock);
+        if (computer->uuid != current.value(QStringLiteral("computerId")).toString() ||
+                computer->authorizationState != NvComputer::AS_AUTHORIZED) continue;
+        for (auto& app : computer->appList) {
+            if (app.name == QStringLiteral("Desktop")) {
+                auto* session = new Session(computer, app, nullptr, m_ComputerManager);
+                session->disableActiveSessionTakeover();
+                return session;
+            }
+        }
+    }
+    return nullptr;
+#endif
 }

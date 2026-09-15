@@ -2951,7 +2951,7 @@ bool Session::startConnectionAsync(bool reconnecting,
                     qInfo() << "PLANK reconnect stopped because another client owns the active session";
                     return false;
                 }
-                if (takeOverActiveSession ||
+                if (!m_AllowActiveSessionTakeover || takeOverActiveSession ||
                         (m_Computer->plankFeatureFlags &
                          NvOutputTopology::SessionTakeoverFeature) == 0) {
                     emit displayLaunchError(

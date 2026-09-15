@@ -32,7 +32,9 @@ accessibility integration remain open.
 
 ## Adapter contract
 
-The adapter supplies a current assigned catalog through `setWorkstations`.
+The adapter supplies trusted push snapshots through `setWorkstations(entries,
+validityMs)`. Asynchronous refresh uses `refreshRequested(token)` and completes
+with `acceptCatalog(token, entries, validityMs)` or `rejectCatalog(token)`.
 Only explicit assigned entries appear. Available means a check may start;
 it is not certificate trust, account authorization, seat ownership, hardware
 attestation or physical output qualification.
@@ -59,6 +61,33 @@ must preserve the desktop when handling disconnect and retain existing input
 cleanup. It must also handle window close/application Quit; the preview does
 not stand in for production lifecycle integration.
 
+### Assignment refresh and expiry
+
+Refresh invalidates cached readiness and latches its request before dispatch.
+Only the current token may publish a reply. A trusted push snapshot supersedes
+pending refresh; late replies cannot restore removed assignments. The adapter
+must release request resources on `catalogCancelRequested(token)` (also emitted
+when a reply is consumed). Refresh times out after 15 seconds. No automatic
+network polling is introduced.
+
+Snapshots have a local cache lifetime of at most 60 seconds. `setWorkstations`
+defaults to that maximum for offline fixtures; async `acceptCatalog` requires an
+explicit positive integer lifetime. Use the smaller of the source's remaining
+validity and this local limit. Never extend a stale server response by assigning
+it a new lifetime. The adapter owns source authentication, revision ordering,
+identity changes, and authoritative expiry. Call `invalidateCatalog` immediately
+when identity/trust changes; explicit sign-out must also close owned sessions.
+The QML contract cannot authenticate arbitrary caller-supplied objects.
+
+Expiry and refresh failure retain the displayed list and layout but disable
+Connect, Reconnect, and Power on. Pending connection work is cancelled before
+late callbacks can run. A cache failure leaves an established session alone;
+a valid snapshot explicitly removing the assignment disconnects it. Lease and
+revocation enforcement remain in the backend. Refresh remains available while
+connected or interrupted. Use-time deadline checks reject elapsed data even if
+Qt has not delivered its timer after sleep; backwards wall-clock changes require
+refresh. A native provider must use monotonic deadlines for its own requests.
+
 Public host metadata alone cannot establish assignment or authentication.
 Do not connect this view directly to mDNS discoveries or label existing
 `authorized`/online bookmark roles as proof that a seat is free. Production
@@ -83,3 +112,19 @@ Power off, raw cycle, Slack commands, controller address or credential is expose
 The root studio-power design records the full contract and implementation order.
 Power telemetry is available behind Show power details; the verified-standby
 cycle explanation remains visible before Power on. Only a fake provider exists in the root preview harness; no live adapter is built.
+
+## Tailscale provider and native login handoff
+
+`TailscaleWorkstations` is registered as a native QML type. Configure its exact
+studio DNS suffix from trusted setup data, then bind `TailscaleAssignments` to
+it and the flow. `TailscaleLogin` uses `ComputerModel` to prepare/check the
+selected PLANK host and run its existing PAM path. The parent supplies the
+credential dialog and owns the Session returned by `sessionPrepared`, including
+exec, display binding, cancellation, and deferred deletion. These components
+are bundled but are not enabled by production `main.qml` yet.
+
+Provider status contains permitted studio node candidates, not proof of a PLANK
+host, account authorization, occupancy, or video capability. Native login
+preparation verifies the selected host first. Local cache failure cannot remove
+a network grant; Tailscale and the host remain the access authorities. The root
+Tailscale integration document describes tests and remaining live gates.

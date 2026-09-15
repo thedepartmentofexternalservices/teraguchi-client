@@ -23,5 +23,14 @@
         <file>gui/PlankCheckBox.qml</file>
         <file>gui/PlankComboBox.qml</file>
         <file>gui/PlankTextField.qml</file>
-    </qresource>
+            <file>gui/teraguchi/TailscaleAssignments.qml</file>
+        <file>gui/teraguchi/TeraguchiButton.qml</file>
+        <file>gui/teraguchi/TeraguchiComputerIcon.qml</file>
+        <file>gui/teraguchi/TeraguchiDisplayChoice.qml</file>
+        <file>gui/teraguchi/TeraguchiScrollBar.qml</file>
+        <file>gui/teraguchi/TeraguchiTheme.qml</file>
+        <file>gui/teraguchi/WorkstationFlow.qml</file>
+        <file>gui/teraguchi/WorkstationPicker.qml</file>
+        <file>gui/teraguchi/TailscaleLogin.qml</file>
+</qresource>
 </RCC>

@@ -2,6 +2,7 @@
 #include "streaming/session.h"
 
 #include <QAbstractListModel>
+#include "backend/teraguchi/tailscaleworkstations.h"
 
 class ComputerModel : public QAbstractListModel
 {
@@ -43,6 +44,16 @@ public:
 
     Q_INVOKABLE Session* createSessionForPlankDesktop(int computerIndex);
 
+    // Tailscale-selected targets never retain a row across refresh or login.
+    Q_INVOKABLE bool prepareAssignedTarget(TailscaleWorkstations* assignments, const QString& nodeId);
+    Q_INVOKABLE QVariantMap assignedLoginTarget(TailscaleWorkstations* assignments,
+                                               const QString& nodeId) const;
+    Q_INVOKABLE QString authenticateAssignedTarget(TailscaleWorkstations* assignments,
+                                                const QVariantMap& expected,
+                                                QString username, QString password);
+    Q_INVOKABLE Session* createAssignedSession(TailscaleWorkstations* assignments,
+                                               const QVariantMap& expected);
+
     Q_INVOKABLE int plankScalingChoice(int computerIndex) const;
 
     Q_INVOKABLE int plankVideoProfile(int computerIndex) const;
@@ -71,6 +82,7 @@ public:
 
 signals:
     void authenticationCompleted(QVariant error);
+    void assignedAuthenticationCompleted(QString requestId, QString computerId, QVariant error);
 
     void relayWakeCompleted(QVariant error);
 
@@ -81,5 +93,5 @@ private slots:
 
 private:
     QVector<NvComputer*> m_Computers;
-    ComputerManager* m_ComputerManager;
+    ComputerManager* m_ComputerManager = nullptr;
 };

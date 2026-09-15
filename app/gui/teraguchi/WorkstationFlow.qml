@@ -15,17 +15,85 @@ QtObject {
     property int attemptDisplays: 0
     property bool resumeAttempt: false
     property bool retainsSession: false
+    // Local cache freshness is independent of session authorization/lease state.
+    property bool catalogFresh: false
+    property bool catalogRefreshing: false
+    property int catalogGeneration: 0
+    property double catalogRequestedAt: 0
+    property double catalogAcceptedAt: 0
+    property double catalogExpiresAt: 0
+    property string catalogProblem: ""
+    property Timer catalogExpiry: Timer {
+        onTriggered: flow.invalidateCatalog()
+    }
+    property Timer catalogTimeout: Timer {
+        interval: 15000
+        onTriggered: flow.rejectCatalog(flow.catalogGeneration)
+    }
     readonly property var selected: findWorkstation(selectedId)
     readonly property bool busy: phase === "checking" || phase === "connecting"
     readonly property bool sessionOpen: retainsSession
-    readonly property bool canConnect: selected !== null && selected.status === "ready" && !busy && !sessionOpen
+    readonly property bool canConnect: catalogFresh && !catalogRefreshing && selected !== null && selected.status === "ready" && !busy && !sessionOpen
     readonly property bool canChoose: !busy && !sessionOpen
 
     signal checkRequested(int token, string workstationId, int displays, bool resume)
     signal connectionRequested(int token, string workstationId, int displays, bool resume)
     signal cancelRequested(int token)
     signal disconnectRequested(string workstationId)
-    signal refreshRequested(string workstationId)
+    signal refreshRequested(int token)
+    signal catalogCancelRequested(int token)
+
+    function catalogIsCurrent() {
+        var now = Date.now();
+        if (catalogFresh && (now < catalogAcceptedAt || now >= catalogExpiresAt))
+            invalidateCatalog();
+        return catalogFresh && !catalogRefreshing;
+    }
+
+    function invalidateCatalog() {
+        var oldCatalogToken = catalogGeneration;
+        var wasRefreshing = catalogRefreshing;
+        var oldToken = generation;
+        var wasBusy = busy;
+        ++catalogGeneration;
+        // Retire connection callbacks before any property notifications or signals.
+        if (wasBusy)
+            ++generation;
+        catalogFresh = false;
+        catalogRefreshing = false;
+        catalogExpiry.stop();
+        catalogTimeout.stop();
+        if (wasBusy) {
+            phase = resumeAttempt ? "interrupted" : "idle";
+            cancelRequested(oldToken);
+        }
+        if (wasRefreshing)
+            catalogCancelRequested(oldCatalogToken);
+        // A failed refresh is not revocation. Keep an established session;
+        // explicit removal in an accepted snapshot still disconnects it.
+    }
+
+    function acceptCatalog(token, entries, validityMs) {
+        if (token !== catalogGeneration || !catalogRefreshing)
+            return false;
+        var now = Date.now();
+        if (now < catalogRequestedAt || now - catalogRequestedAt >= catalogTimeout.interval || !Array.isArray(entries) || !validCatalogLifetime(validityMs))
+            return rejectCatalog(token);
+        setWorkstations(entries, validityMs);
+        return true;
+    }
+
+    function rejectCatalog(token) {
+        if (token !== catalogGeneration || !catalogRefreshing)
+            return false;
+        catalogProblem = qsTr("Couldn't refresh your assignments. Check your connection and try Refresh again.");
+        invalidateCatalog();
+        return false;
+    }
+
+    function validCatalogLifetime(value) {
+        return typeof value === "number" && isFinite(value) && value > 0 && value <= 60000 && Math.floor(value) === value;
+    }
 
     function findWorkstation(id) {
         for (var i = 0; i < workstations.length; ++i) {
@@ -35,10 +103,18 @@ QtObject {
         return null;
     }
 
-    function setWorkstations(entries) {
+    function setWorkstations(entries, validityMs) {
+        // Trusted push snapshots and offline fixtures only. Async replies must
+        // use acceptCatalog so an old request cannot restore revoked entries.
+        // The adapter may shorten the local 60-second maximum cache lifetime.
+        if (validityMs === undefined)
+            validityMs = 60000;
+        if (!Array.isArray(entries) || !validCatalogLifetime(validityMs)) {
+            catalogProblem = qsTr("Assignments could not be verified. Try Refresh again.");
+            invalidateCatalog();
+            return false;
+        }
         // Consume only an assigned catalog. Unknown/malformed entries stay hidden.
-        if (!Array.isArray(entries))
-            entries = [];
         var accepted = [];
         var seen = [];
         for (var i = 0; i < entries.length; ++i) {
@@ -68,7 +144,18 @@ QtObject {
         // QML signal handlers may call the completion API synchronously.
         if (removed || unavailable)
             ++generation;
+        var oldCatalogToken = catalogGeneration;
+        var wasRefreshing = catalogRefreshing;
+        ++catalogGeneration;
+        catalogTimeout.stop();
+        catalogRefreshing = false;
+        catalogProblem = "";
+        catalogAcceptedAt = Date.now();
+        catalogExpiresAt = catalogAcceptedAt + validityMs;
+        catalogExpiry.interval = validityMs;
+        catalogExpiry.restart();
         workstations = accepted;
+        catalogFresh = true;
         if (removed) {
             resumeAttempt = false;
             retainsSession = false;
@@ -82,6 +169,9 @@ QtObject {
             block(qsTr("Availability changed"), qsTr("Check the workstation status before trying again."));
             cancelRequested(oldToken);
         }
+        if (wasRefreshing)
+            catalogCancelRequested(oldCatalogToken);
+        return true;
     }
 
     function selectWorkstation(id) {
@@ -111,6 +201,8 @@ QtObject {
     }
 
     function begin(resume) {
+        if (!catalogIsCurrent())
+            return false;
         if (resume) {
             if (!retainsSession || !(phase === "interrupted" || (phase === "blocked" && resumeAttempt)) || !selected || selected.status !== "ready")
                 return false;
@@ -138,7 +230,7 @@ QtObject {
     }
 
     function acceptCheck(token, result) {
-        if (token !== generation || phase !== "checking")
+        if (!catalogIsCurrent() || token !== generation || phase !== "checking")
             return false;
         if (!result || result.outcome !== "pass") {
             var reason = result ? result.outcome : "unknown";
@@ -146,6 +238,8 @@ QtObject {
                 block(qsTr("Workstation is in use"), qsTr("Another artist is connected. Try again when the workstation is available."));
             else if (reason === "permissions")
                 block(qsTr("Mac permissions needed"), qsTr("Enable Accessibility and Input Monitoring for the client, then check again."));
+            else if (reason === "host-not-ready")
+                block(qsTr("Workstation needs checking"), qsTr("The shared machine did not confirm a compatible workstation. Contact your studio administrator."));
             else if (reason === "offline")
                 block(qsTr("Workstation is offline"), qsTr("Check your network connection. If it stays offline, contact your studio administrator."));
             else
@@ -171,7 +265,7 @@ QtObject {
     }
 
     function acceptConnection(token, success) {
-        if (token !== generation || phase !== "connecting")
+        if (!catalogIsCurrent() || token !== generation || phase !== "connecting")
             return false;
         if (success !== true) {
             block(qsTr("Couldn't open the workstation"), qsTr("The session did not start. Check again; your selected display layout is unchanged."));
@@ -208,9 +302,14 @@ QtObject {
     }
 
     function refresh() {
-        if (busy || sessionOpen)
+        if (busy || catalogRefreshing)
             return false;
-        refreshRequested(selectedId);
+        invalidateCatalog();
+        catalogProblem = "";
+        catalogRequestedAt = Date.now();
+        catalogRefreshing = true;
+        catalogTimeout.restart();
+        refreshRequested(catalogGeneration);
         return true;
     }
 }
