@@ -3,7 +3,7 @@
 #include <SDL3/SDL.h>
 #include "streaming/input/input.h"
 #include "streaming/session.h"
-#include "streaming/plankwaylandcursor.h"
+#include "streaming/planktabletcursor.h"
 #include "streaming/streamutils.h"
 #include "utils.h"
 #ifdef Q_OS_MACOS
@@ -138,11 +138,11 @@ SdlInputHandler::~SdlInputHandler()
     m_LinuxRawWacomInput.reset();
 #endif
 
-    for (auto& output : m_WaylandTabletCursorOutputs) {
+    for (auto& output : m_TabletCursorOutputs) {
         output.cursor->setVisible(false);
         output.cursor->dispatchPending();
     }
-    m_WaylandTabletCursorOutputs.clear();
+    m_TabletCursorOutputs.clear();
 
     if (m_RemoteCursor != nullptr) {
         SDL_DestroyCursor(m_RemoteCursor);
@@ -171,7 +171,7 @@ void SdlInputHandler::setWindow(SDL_Window *window)
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "PLANK local cursor transport enabled");
         setCursorVisible(true);
-        ensureWaylandTabletCursorAttached(m_Window);
+        ensureTabletCursorAttached(m_Window);
     }
     else {
         // Session accepts this only for the authenticated embedded-cursor
@@ -240,33 +240,33 @@ void SdlInputHandler::setPresentationLayout(
         m_PresentationLayout.outputs.append(
             {m_Window, QRect(QPoint(0, 0), m_PresentationLayout.canvasSize), true});
     }
-    reconcileWaylandTabletCursorOutputs();
+    reconcileTabletCursorOutputs();
     updateTabletCursorVisibility();
     updatePointerRegionLock();
 }
 
-void SdlInputHandler::refreshWaylandTabletCursorParents()
+void SdlInputHandler::refreshTabletCursorParents()
 {
     if (!m_LocalCursorSupported) {
         return;
     }
 
-    for (auto& output : m_WaylandTabletCursorOutputs) {
+    for (auto& output : m_TabletCursorOutputs) {
         output.cursor->setVisible(false);
         output.cursor->dispatchPending();
     }
-    m_WaylandTabletCursorOutputs.clear();
+    m_TabletCursorOutputs.clear();
 
     // SDL_CreateRenderer() may replace a Wayland window's native wl_surface.
     // A replacement proxy can reuse the same client address, so raw pointer
     // identity cannot reliably prove that an existing subsurface still has a
     // live parent. Rebuild from the final SDL windows after renderer setup.
-    reconcileWaylandTabletCursorOutputs();
+    reconcileTabletCursorOutputs();
     updateTabletCursorVisibility();
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Refreshed PLANK Wacom cursor parents for %zu presentation output%s",
-                m_WaylandTabletCursorOutputs.size(),
-                m_WaylandTabletCursorOutputs.size() == 1 ? "" : "s");
+                m_TabletCursorOutputs.size(),
+                m_TabletCursorOutputs.size() == 1 ? "" : "s");
 }
 
 bool SdlInputHandler::handleRemoteCursorChunk(const unsigned char* data,
@@ -404,14 +404,14 @@ void SdlInputHandler::applyPendingRemoteCursor()
             (cursor.flags & PLANK_CURSOR_FLAG_VISIBLE) != 0;
     m_AppliedRemoteCursor = cursor;
     m_AppliedRemoteCursorValid = true;
-    reconcileWaylandTabletCursorOutputs();
+    reconcileTabletCursorOutputs();
     const QImage cursorImage(
                 m_AppliedRemoteCursor.pixels.data(),
                 static_cast<int>(m_AppliedRemoteCursor.width),
                 static_cast<int>(m_AppliedRemoteCursor.height),
                 static_cast<int>(m_AppliedRemoteCursor.width * 4U),
                 QImage::Format_ARGB32_Premultiplied);
-    for (auto& output : m_WaylandTabletCursorOutputs) {
+    for (auto& output : m_TabletCursorOutputs) {
         output.cursor->setImage(
                 cursorImage,
                 static_cast<int>(m_AppliedRemoteCursor.hotspotX),
@@ -503,8 +503,8 @@ void SdlInputHandler::applyPendingRemoteCursorPosition()
     if (!mapRemoteCursorPositionToWindow(position, targetWindow, x, y)) {
         return;
     }
-    PlankWaylandCursor* cursor =
-            ensureWaylandTabletCursorAttached(targetWindow);
+    PlankTabletCursor* cursor =
+            ensureTabletCursorAttached(targetWindow);
     if (cursor == nullptr) {
         return;
     }
@@ -525,9 +525,9 @@ void SdlInputHandler::applyPendingTabletCursorActivation()
         if (isCaptureActive()) setCursorVisible(false);
         return;
     }
-    reconcileWaylandTabletCursorOutputs();
+    reconcileTabletCursorOutputs();
     if (!m_LocalCursorSupported || !isCaptureActive() ||
-            m_WaylandTabletCursorOutputs.empty()) {
+            m_TabletCursorOutputs.empty()) {
         m_TabletCursorActivationPending.store(false);
         return;
     }
@@ -667,7 +667,7 @@ void SdlInputHandler::resetRemoteCursorPositionEpoch()
     m_AppliedRemoteCursorPositionSequence = 0;
     m_TabletCursorActivationSequence = 0;
     m_TabletCursorActivationPending.store(false);
-    for (auto& output : m_WaylandTabletCursorOutputs) {
+    for (auto& output : m_TabletCursorOutputs) {
         output.cursor->setVisible(false);
         output.cursor->dispatchPending();
     }
@@ -845,7 +845,7 @@ void SdlInputHandler::activateCompositorCursor()
     }
 
     m_TabletCursorActive = false;
-    for (auto& output : m_WaylandTabletCursorOutputs) {
+    for (auto& output : m_TabletCursorOutputs) {
         output.cursor->setVisible(false);
         output.cursor->dispatchPending();
     }
@@ -855,7 +855,7 @@ void SdlInputHandler::activateCompositorCursor()
         SDL_HideCursor();
     }
     SDL_LogDebug(SDL_LOG_CATEGORY_INPUT,
-                 "Restored Wayland compositor cursor for mouse input");
+                 "Restored native compositor cursor for mouse input");
 }
 
 bool SdlInputHandler::mapRemoteCursorPositionToWindow(
@@ -889,40 +889,41 @@ bool SdlInputHandler::mapRemoteCursorPositionToWindow(
     return false;
 }
 
-PlankWaylandCursor*
-SdlInputHandler::ensureWaylandTabletCursorAttached(SDL_Window* targetWindow)
+PlankTabletCursor*
+SdlInputHandler::ensureTabletCursorAttached(SDL_Window* targetWindow)
 {
     const char* driver = SDL_GetCurrentVideoDriver();
     if (!m_LocalCursorSupported || targetWindow == nullptr ||
-            driver == nullptr || SDL_strcmp(driver, "wayland") != 0) {
+            driver == nullptr ||
+            (SDL_strcmp(driver, "wayland") != 0 && SDL_strcmp(driver, "cocoa") != 0)) {
         return nullptr;
     }
 
     auto existing = std::find_if(
-            m_WaylandTabletCursorOutputs.begin(),
-            m_WaylandTabletCursorOutputs.end(),
-            [targetWindow](const WaylandTabletCursorOutput& output) {
+            m_TabletCursorOutputs.begin(),
+            m_TabletCursorOutputs.end(),
+            [targetWindow](const TabletCursorOutput& output) {
                 return output.window == targetWindow;
             });
-    if (existing != m_WaylandTabletCursorOutputs.end() &&
+    if (existing != m_TabletCursorOutputs.end() &&
             existing->cursor->isAttachedTo(targetWindow)) {
         return existing->cursor.get();
     }
 
-    const bool replacing = existing != m_WaylandTabletCursorOutputs.end();
+    const bool replacing = existing != m_TabletCursorOutputs.end();
     if (replacing) {
         existing->cursor->setVisible(false);
         existing->cursor->dispatchPending();
         existing->cursor.reset();
     }
 
-    std::unique_ptr<PlankWaylandCursor> cursor =
-            PlankWaylandCursor::create(targetWindow);
+    std::unique_ptr<PlankTabletCursor> cursor =
+            PlankTabletCursor::create(targetWindow);
     if (!cursor) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Unable to attach PLANK Wayland Wacom cursor surface");
+                    "Unable to attach PLANK native Wacom cursor surface");
         if (replacing) {
-            m_WaylandTabletCursorOutputs.erase(existing);
+            m_TabletCursorOutputs.erase(existing);
         }
         return nullptr;
     }
@@ -957,23 +958,23 @@ SdlInputHandler::ensureWaylandTabletCursorAttached(SDL_Window* targetWindow)
     cursor->setVisible(visible);
     cursor->dispatchPending();
 
-    PlankWaylandCursor* result = cursor.get();
+    PlankTabletCursor* result = cursor.get();
     if (replacing) {
         existing->cursor = std::move(cursor);
     }
     else {
-        m_WaylandTabletCursorOutputs.push_back(
+        m_TabletCursorOutputs.push_back(
                 {targetWindow, std::move(cursor)});
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 replacing ?
-                    "Reattached PLANK Wacom cursor to replacement Wayland parent surface for window %u" :
-                    "PLANK Wayland Wacom cursor surface enabled for window %u",
+                    "Reattached PLANK Wacom cursor to replacement native parent surface for window %u" :
+                    "PLANK native Wacom cursor surface enabled for window %u",
                 SDL_GetWindowID(targetWindow));
     return result;
 }
 
-void SdlInputHandler::reconcileWaylandTabletCursorOutputs()
+void SdlInputHandler::reconcileTabletCursorOutputs()
 {
     if (!m_LocalCursorSupported) {
         return;
@@ -990,29 +991,29 @@ void SdlInputHandler::reconcileWaylandTabletCursorOutputs()
                     return output.window == window;
                 });
     };
-    auto output = m_WaylandTabletCursorOutputs.begin();
-    while (output != m_WaylandTabletCursorOutputs.end()) {
+    auto output = m_TabletCursorOutputs.begin();
+    while (output != m_TabletCursorOutputs.end()) {
         if (containsWindow(output->window)) {
             ++output;
             continue;
         }
         output->cursor->setVisible(false);
         output->cursor->dispatchPending();
-        output = m_WaylandTabletCursorOutputs.erase(output);
+        output = m_TabletCursorOutputs.erase(output);
     }
 
     if (m_PresentationLayout.outputs.isEmpty()) {
-        ensureWaylandTabletCursorAttached(m_Window);
+        ensureTabletCursorAttached(m_Window);
         return;
     }
     for (const auto& presentationOutput : m_PresentationLayout.outputs) {
-        ensureWaylandTabletCursorAttached(presentationOutput.window);
+        ensureTabletCursorAttached(presentationOutput.window);
     }
 }
 
 void SdlInputHandler::updateTabletCursorVisibility()
 {
-    reconcileWaylandTabletCursorOutputs();
+    reconcileTabletCursorOutputs();
 
     SDL_Window* positionWindow = nullptr;
     int x = 0;
@@ -1026,7 +1027,7 @@ void SdlInputHandler::updateTabletCursorVisibility()
             m_RemoteCursorVisible &&
             m_AppliedRemoteCursorPositionSequence >
                 m_TabletCursorActivationSequence;
-    for (auto& output : m_WaylandTabletCursorOutputs) {
+    for (auto& output : m_TabletCursorOutputs) {
         output.cursor->setVisible(visible && output.window == positionWindow);
         output.cursor->dispatchPending();
     }

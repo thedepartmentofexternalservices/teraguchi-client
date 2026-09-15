@@ -304,7 +304,8 @@ HEADERS += streaming/input/keyboardmap.h
 
 macx {
     SOURCES += streaming/input/macpen.cpp streaming/input/pen.cpp
-    HEADERS += streaming/input/macpen.h
+    HEADERS += streaming/input/macpen.h streaming/mactabletcursor.h
+    OBJECTIVE_SOURCES += streaming/mactabletcursor.mm
     SOURCES += streaming/input/mackeyboard.cpp streaming/input/macsystemkeys.mm
     HEADERS += streaming/input/mackeyboard.h streaming/input/macsystemkeys.h
     LIBS += -framework ApplicationServices -framework Carbon
@@ -672,3 +673,5 @@ macx: OBJECTIVE_SOURCES += streaming/macpresentationwindows.mm
 HEADERS += backend/teraguchi/studiosetup.h
 SOURCES += backend/teraguchi/studiosetup.cpp
 !include($$PWD/backend/teraguchi/studiotrust.pri): error(Cannot configure studio verification)
+
+HEADERS += streaming/planktabletcursor.h

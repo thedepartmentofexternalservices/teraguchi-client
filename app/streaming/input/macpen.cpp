@@ -9,9 +9,11 @@ constexpr SDL_PenInputFlags InteractionFlags = SDL_PEN_INPUT_DOWN |
 }
 
 MacPenInput::MacPenInput(Sender sender, Mapper mapper, std::function<void()> failure,
-                        LocalHandler local, std::function<void()> resetLocal)
+                        LocalHandler local, std::function<void()> resetLocal,
+                        std::function<void(bool)> remoteCursor)
     : m_Send(std::move(sender)), m_Map(std::move(mapper)), m_Failure(std::move(failure)),
-      m_Local(std::move(local)), m_ResetLocal(std::move(resetLocal))
+      m_Local(std::move(local)), m_ResetLocal(std::move(resetLocal)),
+      m_RemoteCursor(std::move(remoteCursor))
 {}
 
 bool MacPenInput::isPenEvent(Uint32 type)
@@ -60,6 +62,7 @@ void MacPenInput::cancel()
         send(packet);
     }
     m_RemoteOwned = m_RemoteDown = false;
+    if (m_RemoteCursor) m_RemoteCursor(false);
 }
 
 void MacPenInput::clearSample()
@@ -195,5 +198,8 @@ void MacPenInput::flush()
     packet.rotation = Uint16(std::lround(direction)) % 360;
     if (send(packet)) {
         m_RemoteOwned = true; m_RemoteDown = down; m_RemoteTool = packet.tool;
+        // Reclaim after an intervening real mouse event too. Only accepted,
+        // fully assembled remote samples may hide the native pointer.
+        if (m_RemoteCursor) m_RemoteCursor(true);
     }
 }

@@ -17,7 +17,7 @@
 class LinuxWacomInput;
 class LinuxRawWacomInput;
 #endif
-class PlankWaylandCursor;
+#include "streaming/planktabletcursor.h"
 #ifdef Q_OS_MACOS
 class MacPenInput;
 class MacKeyboardState;
@@ -40,7 +40,7 @@ public:
     void setPresentationFullscreen(bool fullscreen) { m_PresentationFullscreen = fullscreen; }
     void setPresentationLayout(const PlankPresentationLayout& layout);
 
-    void refreshWaylandTabletCursorParents();
+    void refreshTabletCursorParents();
 
     void handleKeyEvent(SDL_KeyboardEvent* event);
 
@@ -189,17 +189,17 @@ private:
     bool m_AppliedRemoteCursorPositionValid = false;
     std::atomic_bool m_RemoteCursorPositionUpdatePending {false};
     std::atomic_bool m_TabletCursorActivationPending {false};
-    struct WaylandTabletCursorOutput {
+    struct TabletCursorOutput {
         SDL_Window* window = nullptr;
-        std::unique_ptr<PlankWaylandCursor> cursor;
+        std::unique_ptr<PlankTabletCursor> cursor;
     };
-    std::vector<WaylandTabletCursorOutput> m_WaylandTabletCursorOutputs;
+    std::vector<TabletCursorOutput> m_TabletCursorOutputs;
 
     void setCursorVisible(bool visible);
     void activateCompositorCursor();
-    PlankWaylandCursor* ensureWaylandTabletCursorAttached(
+    PlankTabletCursor* ensureTabletCursorAttached(
         SDL_Window* targetWindow);
-    void reconcileWaylandTabletCursorOutputs();
+    void reconcileTabletCursorOutputs();
     bool mapRemoteCursorPositionToWindow(const RemoteCursorPosition& position,
                                          SDL_Window*& window,
                                          int& x, int& y) const;

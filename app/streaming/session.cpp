@@ -3689,7 +3689,7 @@ void Session::flushWindowEvents()
     // Wayland Wacom subsurface explicitly; native wl_surface proxy addresses
     // alone cannot identify a replacement reliably.
     if (m_InputHandler != nullptr) {
-        m_InputHandler->refreshWaylandTabletCursorParents();
+        m_InputHandler->refreshTabletCursorParents();
     }
 
     // Insert a barrier to discard any additional window events.

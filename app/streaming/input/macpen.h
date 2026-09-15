@@ -22,7 +22,8 @@ public:
     using LocalHandler = std::function<bool(SDL_PenID, SDL_WindowID, float, float, SDL_PenInputFlags, Uint64)>;
 
     MacPenInput(Sender sender, Mapper mapper, std::function<void()> failure,
-                LocalHandler local = {}, std::function<void()> resetLocal = {});
+                LocalHandler local = {}, std::function<void()> resetLocal = {},
+                std::function<void(bool)> remoteCursor = {});
     static bool isPenEvent(Uint32 type);
     static bool isSyntheticMouse(const SDL_Event& event);
     void beforeEvent(const SDL_Event& event);
@@ -40,6 +41,7 @@ private:
     std::function<void()> m_Failure;
     LocalHandler m_Local;
     std::function<void()> m_ResetLocal;
+    std::function<void(bool)> m_RemoteCursor;
     SDL_PenID m_Pen = 0;
     SDL_WindowID m_Window = 0;
     Uint64 m_Timestamp = 0;
