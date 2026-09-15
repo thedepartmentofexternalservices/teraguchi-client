@@ -511,7 +511,39 @@ void SdlInputHandler::applyPendingRemoteCursorPosition()
     cursor->setPosition(x, y);
     cursor->dispatchPending();
     updateTabletCursorVisibility();
+#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
+    tracePenCursor("host");
+#endif
 }
+
+#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
+void SdlInputHandler::tracePenCursor(const char* trigger)
+{
+    // Called only on the SDL main thread. Pen-triggered records also expose
+    // missing cursor updates; logging must not depend on their arrival.
+    const auto now = SDL_GetTicks();
+    if (!m_PenTraceStart || now - m_PenTraceStart > 15000 ||
+            now - m_PenTraceLast < 100) return;
+    m_PenTraceLast = now;
+    SDL_Window* window = nullptr;
+    int x = 0, y = 0;
+    const bool mapped = m_AppliedRemoteCursorPositionValid &&
+            mapRemoteCursorPositionToWindow(m_AppliedRemoteCursorPosition, window, x, y);
+    const auto& position = m_AppliedRemoteCursorPosition;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        "Mac pen diagnosis t=%llu trigger=%s pen_count=%u action=%u pen=(%.5f,%.5f) mouse_count=%u mouse_buttons=%u mouse_id=%u mouse=(%.1f,%.1f) host_valid=%d host=(%u,%u) mapped=%d window=(%d,%d) tablet_active=%d host_visible=%d sdl_visible=%d fresh=%d",
+        static_cast<unsigned long long>(now - m_PenTraceStart), trigger,
+        m_PenTracePackets, m_PenTraceAction, m_PenTraceX, m_PenTraceY,
+        m_PenTraceMouseEvents, m_PenTraceMouseButtons, m_PenTraceMouseId,
+        m_PenTraceMouseX, m_PenTraceMouseY,
+        int(m_AppliedRemoteCursorPositionValid),
+        m_AppliedRemoteCursorPositionValid ? position.x : 0U,
+        m_AppliedRemoteCursorPositionValid ? position.y : 0U,
+        int(mapped), x, y, int(m_TabletCursorActive), int(m_RemoteCursorVisible),
+        int(SDL_CursorVisible()),
+        int(m_AppliedRemoteCursorPositionSequence > m_TabletCursorActivationSequence));
+}
+#endif
 
 void SdlInputHandler::applyPendingTabletCursorActivation()
 {

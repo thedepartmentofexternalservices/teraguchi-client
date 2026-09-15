@@ -303,6 +303,8 @@ contains(DEFINES, HAVE_LIBINPUT_TABLET) {
 HEADERS += streaming/input/keyboardmap.h
 
 macx {
+    penCursorDiagnostics = $$(PLANK_PEN_CURSOR_DIAGNOSTICS)
+    equals(penCursorDiagnostics, 1): DEFINES += PLANK_PEN_CURSOR_DIAGNOSTICS
     SOURCES += streaming/input/macpen.cpp streaming/input/pen.cpp
     HEADERS += streaming/input/macpen.h streaming/mactabletcursor.h
     OBJECTIVE_SOURCES += streaming/mactabletcursor.mm

@@ -143,6 +143,17 @@ private:
     bool m_RemoteCursorVisible;
     bool m_CompositorCursorRequestedVisible;
     bool m_TabletCursorActive;
+#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
+    // Explicit diagnostic builds only. Bounded to 15 seconds after first pen
+    // forwarding, at most ten position records/second. Never records keys.
+    Uint64 m_PenTraceStart = 0, m_PenTraceLast = 0;
+    unsigned m_PenTracePackets = 0, m_PenTraceMouseEvents = 0;
+    float m_PenTraceX = 0, m_PenTraceY = 0;
+    float m_PenTraceMouseX = 0, m_PenTraceMouseY = 0;
+    Uint32 m_PenTraceMouseId = 0;
+    unsigned m_PenTraceAction = 0, m_PenTraceMouseButtons = 0;
+    void tracePenCursor(const char* trigger);
+#endif
 
     QSet<short> m_KeysDown;
     bool m_FakeMouseCaptureActive;

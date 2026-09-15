@@ -21,6 +21,14 @@ void SdlInputHandler::handleMouseButtonEvent(SDL_MouseButtonEvent* event)
         return;
     }
     activateCompositorCursor();
+#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
+    if (isCaptureActive()) {
+        ++m_PenTraceMouseButtons;
+        m_PenTraceMouseId = event->which;
+        m_PenTraceMouseX = event->x; m_PenTraceMouseY = event->y;
+        tracePenCursor("mouse-button");
+    }
+#endif
     if (!isCaptureActive()) {
         if (event->button == SDL_BUTTON_LEFT && !event->down &&
                 isMouseInVideoRegion(event->x, event->y,
@@ -95,7 +103,15 @@ void SdlInputHandler::handleMouseMotionEvent(SDL_MouseMotionEvent* event,
         // Ignore synthetic mouse events
         return;
     }
+#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
+    ++m_PenTraceMouseEvents;
+    m_PenTraceMouseId = event->which;
+    m_PenTraceMouseX = event->x; m_PenTraceMouseY = event->y;
+#endif
     activateCompositorCursor();
+#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
+    tracePenCursor("mouse-motion");
+#endif
 
     SDL_Window* window = presentationWindow(event->windowID);
     if (window == nullptr) {

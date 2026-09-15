@@ -6,10 +6,25 @@ void SdlInputHandler::initializeMacPen()
 {
     if (m_MacPenInput) m_MacPenInput->suspend();
     m_MacPenInput = std::make_unique<MacPenInput>(
-        [](const MacPenInput::Packet& packet) {
-            return LiSendPenEvent(packet.action, packet.tool, packet.buttons,
+        [this](const MacPenInput::Packet& packet) {
+            const bool accepted = LiSendPenEvent(packet.action, packet.tool, packet.buttons,
                                   packet.x, packet.y, packet.pressure,
                                   0.0f, 0.0f, packet.rotation, packet.tilt) == 0;
+#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
+            if (accepted && packet.action != LI_TOUCH_EVENT_CANCEL_ALL) {
+                if (!m_PenTraceStart) {
+                    m_PenTraceStart = SDL_GetTicks();
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "Mac pen diagnosis started: 15 seconds, maximum 10 coordinate records/second");
+                }
+                ++m_PenTracePackets;
+                m_PenTraceAction = packet.action;
+                m_PenTraceX = packet.x; m_PenTraceY = packet.y;
+            }
+#else
+            (void)this;
+#endif
+            return accepted;
         },
         [this](SDL_WindowID id, float x, float y, float& normalizedX, float& normalizedY) {
             if (!isCaptureActive() || m_PenToolbarActive) return false;
@@ -46,6 +61,9 @@ void SdlInputHandler::initializeMacPen()
             // guess Flame margins or warp the Mac pointer feeding pen events.
             m_TabletCursorActivationPending.store(true);
             applyPendingTabletCursorActivation();
+#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
+            tracePenCursor("pen");
+#endif
         });
 }
 
