@@ -135,6 +135,7 @@ QNetworkReply* NvHTTP::pinnedRequest(QNetworkRequest request, const QByteArray& 
     auto manager = std::make_unique<QNetworkAccessManager>(this);
     manager->setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
     bool checked = false;
+    bool sawSslErrors = false;
     const auto matches = [this, url](QNetworkReply* reply) {
         const auto ssl = negotiatedPlankTls(reply);
         return hostRequestPermitted(url) && reply->url() == url &&
@@ -142,7 +143,8 @@ QNetworkReply* NvHTTP::pinnedRequest(QNetworkRequest request, const QByteArray& 
                 m_HostTrust->accepts(ssl.peerCertificate().digest(QCryptographicHash::Sha256));
     };
     connect(manager.get(), &QNetworkAccessManager::sslErrors, manager.get(),
-            [this, url](QNetworkReply* reply, const QList<QSslError>& errors) {
+            [this, url, &sawSslErrors](QNetworkReply* reply, const QList<QSslError>& errors) {
+        sawSslErrors = true;
         if (hostRequestPermitted(url) && reply->url() == url &&
                 m_HostTrust->accepts(reply->sslConfiguration().peerCertificate().digest(QCryptographicHash::Sha256)))
             handleSslErrors(reply, errors);
@@ -165,11 +167,26 @@ QNetworkReply* NvHTTP::pinnedRequest(QNetworkRequest request, const QByteArray& 
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, &loop, &QEventLoop::quit);
     QTimer timer;
     timer.setSingleShot(true);
-    connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    bool timedOut = false;
+    connect(&timer, &QTimer::timeout, &loop, [&] { timedOut = true; loop.quit(); });
     timer.start(timeoutMs > 0 ? timeoutMs : REQUEST_TIMEOUT_MS);
     if (!reply->isFinished()) loop.exec(QEventLoop::ExcludeUserInputEvents);
     if (!reply->isFinished()) reply->abort();
     QObject::disconnect(manager.get(), nullptr, nullptr, nullptr);
+    // A restarting display worker may not be listening yet. No certificate
+    // was evaluated in that case, so retain the network failure type used by
+    // the bounded startup/reconnect wait. Never reclassify a TLS rejection or
+    // a revoked setup/assignment, and never send HTTP before verification.
+    const auto networkError = reply->error();
+    const bool unavailable = timedOut || networkError == QNetworkReply::ConnectionRefusedError ||
+            networkError == QNetworkReply::RemoteHostClosedError ||
+            networkError == QNetworkReply::HostNotFoundError ||
+            networkError == QNetworkReply::TimeoutError ||
+            networkError == QNetworkReply::TemporaryNetworkFailureError;
+    if (!checked && !sawSslErrors && hostRequestPermitted(url) &&
+            negotiatedPlankTls(reply.data()).peerCertificate().isNull() && unavailable)
+        throw QtNetworkReplyException(timedOut ? QNetworkReply::TimeoutError : networkError,
+                                      "Workstation connection is unavailable or timed out");
     if (!checked || !matches(reply.data()))
         throw GfeHttpResponseException(401, "Workstation certificate or setup was rejected. Ask the studio for current setup.");
     if (oversized || reply->bytesAvailable() > limit)
