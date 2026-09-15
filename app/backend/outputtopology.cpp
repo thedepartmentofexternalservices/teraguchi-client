@@ -195,6 +195,16 @@ bool NvOutputTopology::fromJson(const QJsonObject& object,
     parsed.generation = object.value("generation").toString();
     const QJsonObject layout = object.value("layout").toObject();
     int declaredOutputCount = 0;
+    // A headless X screen can have a framebuffer but no active outputs.
+    // Keep rejecting it, while identifying the repair needed before login
+    // instead of reporting a generic malformed-layout error.
+    if (requireInteger(layout, "output_count", declaredOutputCount) &&
+            declaredOutputCount == 0 && object.value("outputs").toArray().isEmpty()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("Host reported no connected outputs");
+        }
+        return false;
+    }
     parsed.layoutKind = layout.value("kind").toString();
     parsed.startupLayoutKind = layout.value("startup_kind").toString();
     if (!layout.value("allowed_kinds").isArray()) {

@@ -11,6 +11,7 @@ private slots:
     void roundTripsQualificationVector();
     void rejectsDuplicateIdentity();
     void rejectsConfiguredModeMismatch();
+    void reportsHeadlessHostWithoutOutputs();
     void acceptsTallCinemaModes();
     void enforcesHostDisplayPolicy();
     void validatesRequestedLayoutGeometry();
@@ -22,6 +23,29 @@ private slots:
     void recognizesDescriptionCapabilities();
     void matchesMacClientCanvas();
 };
+
+void TestOutputTopology::reportsHeadlessHostWithoutOutputs()
+{
+    QFile file(QString::fromUtf8(qgetenv("PLANK_REPO_ROOT")) + "/tests/protocol/output-topology-v13.json");
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto fixture = QJsonDocument::fromJson(file.readAll()).object();
+    NvOutputTopology topology;
+    QVERIFY(NvOutputTopology::fromJson(fixture, topology));
+    const auto before = topology.toJson();
+    auto empty = fixture;
+    auto layout = empty["layout"].toObject();
+    layout["kind"] = "physical";
+    layout["virtual"] = false;
+    layout["virtual_modes"] = QJsonArray();
+    layout["output_count"] = 0;
+    empty["layout"] = layout;
+    empty["outputs"] = QJsonArray();
+    empty["desktop"] = QJsonObject{{"x", 0}, {"y", 0}, {"width", 0}, {"height", 0}};
+    QString error;
+    QVERIFY(!NvOutputTopology::fromJson(empty, topology, &error));
+    QCOMPARE(error, QStringLiteral("Host reported no connected outputs"));
+    QCOMPARE(topology.toJson(), before); // A diagnostic must never accept or replace topology.
+}
 
 void TestOutputTopology::recognizesDescriptionCapabilities()
 {

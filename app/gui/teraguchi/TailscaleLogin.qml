@@ -117,7 +117,16 @@ QtObject {
                 return;
             if (!login.current()) { login.assignments.flow.invalidateCatalog(); login.cancel(); return; }
             if (error !== undefined && error !== null) {
-                login.assignments.flow.acceptCheck(login.token, {outcome: "unknown"});
+                // Native sign-in also checks display topology. Preserve its
+                // failure instead of reducing every error to "unknown".
+                // WorkstationPicker renders this bounded detail as plain text.
+                var detail = typeof error === "string" ? error.slice(0, 1024) : "";
+                if (detail.indexOf("Host reported no connected outputs") === 0)
+                    login.assignments.flow.block(qsTr("Workstation display unavailable"),
+                        qsTr("The workstation reports no active displays. Ask your studio administrator to prepare its headless display or connect a monitor, then try again."), "displays");
+                else
+                    login.assignments.flow.block(qsTr("Sign-in check failed"),
+                        detail || qsTr("The workstation could not complete sign-in. Check your credentials and try again."), "login");
                 login.cancel();
                 return;
             }
