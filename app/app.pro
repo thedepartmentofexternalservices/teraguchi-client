@@ -5,6 +5,7 @@ contains(CONFIG, teraguchi-strict-video) {
     !macx: error("Teraguchi strict video is available only for Mac builds")
     DEFINES += TERAGUCHI_STRICT_VIDEO
 }
+HEADERS += backend/teraguchi/hosttrust.h
 HEADERS += streaming/video/decoderpolicy.h \
     streaming/video/teraguchivideo.h streaming/video/teraguchiframe.h
 

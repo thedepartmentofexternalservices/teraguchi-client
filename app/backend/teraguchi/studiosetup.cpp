@@ -9,6 +9,8 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
+#include <QSet>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
@@ -65,10 +67,13 @@ TeraguchiStudio::Profile TeraguchiStudio::verify(const QByteArray& envelope, con
                              reinterpret_cast<const unsigned char*>(message.constData()), message.size()) != 1)
         return reject(QObject::tr("The studio signature could not be verified. Ask your administrator for a new setup file."));
     const auto content = QJsonDocument::fromJson(payload);
-    if (!content.isObject() || content.toJson(QJsonDocument::Compact) != payload ||
-            !fields(content.object(), {"version", "revision", "label", "dns_suffix", "issued_at", "expires_at"}))
-        return reject(QObject::tr("The signed setup uses an unsupported format."));
     const auto object = content.object();
+    const bool hostTrustVersion = object.value("version") == QJsonValue(2);
+    QStringList expectedFields {"version", "revision", "label", "dns_suffix", "issued_at", "expires_at"};
+    if (hostTrustVersion) expectedFields.append("workstations");
+    if (!content.isObject() || content.toJson(QJsonDocument::Compact) != payload ||
+            !fields(object, expectedFields))
+        return reject(QObject::tr("The signed setup uses an unsupported format."));
     Profile profile;
     profile.label = object.value("label").toString();
     profile.suffix = object.value("dns_suffix").toString();
@@ -78,7 +83,7 @@ TeraguchiStudio::Profile TeraguchiStudio::verify(const QByteArray& envelope, con
     const auto expires = object.value("expires_at").toString();
     const auto issuedDate = QDateTime::fromString(issued, Qt::ISODate);
     const auto expiresDate = QDateTime::fromString(expires, Qt::ISODate);
-    if (object.value("version") != QJsonValue(1) || profile.revision < 1 || profile.revision > 2147483647 ||
+    if ((!hostTrustVersion && object.value("version") != QJsonValue(1)) || profile.revision < 1 || profile.revision > 2147483647 ||
             revision != profile.revision || profile.label.isEmpty() || profile.label.size() > 80 ||
             profile.label != profile.label.trimmed() || profile.label.contains(QRegularExpression("[\\x00-\\x1f\\x7f<>]")) ||
             profile.suffix.isEmpty() || TailscaleWorkstations::normalizedSuffix(profile.suffix) != profile.suffix ||
@@ -90,6 +95,36 @@ TeraguchiStudio::Profile TeraguchiStudio::verify(const QByteArray& envelope, con
     if ((!allowInactive && (profile.issued > now || profile.expires <= now)) || profile.issued <= 0 ||
             profile.expires <= profile.issued || profile.expires - profile.issued > 90 * 86400)
         return reject(QObject::tr("This studio setup is not currently valid. Check your clock or ask your administrator for a new file."));
+    if (hostTrustVersion) {
+        const auto entries = object.value("workstations");
+        if (!entries.isArray() || entries.toArray().isEmpty() || entries.toArray().size() > 8)
+            return reject(QObject::tr("The setup must contain one to eight trusted workstations."));
+        QSet<QString> hostIds;
+        QSet<QByteArray> fingerprints;
+        const QRegularExpression identifier(QRegularExpression::anchoredPattern("[A-Za-z0-9_-]{1,64}"));
+        const QRegularExpression fingerprint(QRegularExpression::anchoredPattern("[0-9a-f]{64}"));
+        for (const auto& value : entries.toArray()) {
+            const auto entry = value.toObject();
+            const auto node = entry.value("node_id").toString();
+            Workstation workstation;
+            workstation.hostId = entry.value("host_id").toString();
+            const auto pins = entry.value("certificate_sha256");
+            if (!value.isObject() || !fields(entry, {"node_id", "host_id", "certificate_sha256"}) ||
+                    !identifier.match(node).hasMatch() || !identifier.match(workstation.hostId).hasMatch() ||
+                    profile.workstations.contains(node) || hostIds.contains(workstation.hostId) ||
+                    !pins.isArray() || pins.toArray().isEmpty() || pins.toArray().size() > 2)
+                return reject(QObject::tr("The trusted workstation details are invalid or duplicated."));
+            hostIds.insert(workstation.hostId);
+            for (const auto& pin : pins.toArray()) {
+                const auto hex = pin.toString();
+                const auto bytes = QByteArray::fromHex(hex.toLatin1());
+                if (!pin.isString() || !fingerprint.match(hex).hasMatch() || fingerprints.contains(bytes))
+                    return reject(QObject::tr("Workstation certificate fingerprints are invalid or reused."));
+                fingerprints.insert(bytes); workstation.certificates.append(bytes);
+            }
+            profile.workstations.insert(node, workstation);
+        }
+    }
     profile.digest = QCryptographicHash::hash(payload, QCryptographicHash::Sha256);
     return profile;
 }

@@ -370,6 +370,10 @@ QVariantMap ComputerModel::assignedLoginTarget(TailscaleWorkstations* assignment
     if (!assignments || !m_ComputerManager) return {};
     auto peer = assignments->resolve(nodeId);
     if (peer.isEmpty()) return {};
+    const auto setup = assignments->studioPermit();
+    if (!setup || setup->development || !setup->valid() || !setup->profile.workstations.contains(nodeId))
+        return {{QStringLiteral("trustError"), tr("Import current studio setup containing this workstation’s trusted certificate before signing in.")}};
+    const auto trustedHost = setup->profile.workstations.value(nodeId).hostId;
     const QHostAddress address(peer.value(QStringLiteral("address")).toString());
     QVariantMap found;
     // Resolve against the current manager, independent of cached view ordering.
@@ -381,6 +385,8 @@ QVariantMap ComputerModel::assignedLoginTarget(TailscaleWorkstations* assignment
                 computer->serverUuid.isEmpty() ||
                 QHostAddress(computer->manualAddress.address()) != address ||
                 computer->activeAddress != computer->manualAddress) continue;
+        if (computer->serverUuid != trustedHost)
+            return {{QStringLiteral("trustError"), tr("The workstation identity differs from studio setup. Ask the studio to verify it before signing in.")}};
         if (!found.isEmpty()) return {}; // Ambiguous endpoints must be resolved by setup.
         found = peer;
         found.insert(QStringLiteral("computerId"), computer->uuid);
@@ -409,12 +415,17 @@ QString ComputerModel::authenticateAssignedTarget(TailscaleWorkstations* assignm
         { QReadLocker lock(&computer->lock); id = computer->uuid; address = computer->activeAddress; }
         if (id == current.value(QStringLiteral("computerId")).toString()) {
             if (QHostAddress(address.address()) != QHostAddress(current.value(QStringLiteral("address")).toString())) return {};
-            // Use PLANK's existing TLS/PAM path with an explicit endpoint/identity.
+            auto trust = std::make_shared<TeraguchiStudio::HostTrust>();
+            trust->setup = assignments->studioPermit();
+            trust->nodeId = current.value("id").toString();
+            trust->hostId = current.value("hostId").toString();
+            trust->address = address.address(); trust->port = address.port();
+            if (!trust->valid()) { password.fill(QChar(0)); return {}; }
             const auto requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_AuthenticationDisplays.insert(requestId, displayToken);
             m_AuthenticationSetup.insert(requestId, assignments->studioPermit());
             m_ComputerManager->authenticateHost(computer, std::move(username), std::move(password),
-                                                 address, current.value(QStringLiteral("hostId")).toString(), requestId);
+                                                 address, current.value(QStringLiteral("hostId")).toString(), requestId, trust);
             return requestId;
         }
     }
@@ -486,6 +497,11 @@ Session* ComputerModel::createAssignedSession(TailscaleWorkstations* assignments
     QString username, password;
     auto computer = m_ComputerManager->takeAssignedAuthentication(requestId, username, password);
     if (!computer) return nullptr;
+    if (!computer->assignedHostTrust || !computer->assignedHostTrust->valid() ||
+            computer->assignedHostTrust->setup != assignments->studioPermit() ||
+            computer->assignedHostTrust->nodeId != current.value("id").toString()) {
+        password.fill(QChar(0)); return nullptr;
+    }
     if (computer->uuid != current.value("computerId").toString() ||
             computer->serverUuid != current.value("hostId").toString() ||
             QHostAddress(computer->activeAddress.address()) != QHostAddress(current.value("address").toString())) {

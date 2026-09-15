@@ -257,7 +257,7 @@ public:
 
     void authenticateHost(NvComputer* computer, QString username, QString password,
                           NvAddress expectedAddress = NvAddress(), QString expectedServerUuid = QString(),
-                          QString requestId = QString());
+                          QString requestId = QString(), TeraguchiStudio::HostLease hostTrust = {});
 
     void cancelAssignedAuthentication(const QString& requestId);
     std::unique_ptr<NvComputer> takeAssignedAuthentication(const QString& requestId, QString& username, QString& password);

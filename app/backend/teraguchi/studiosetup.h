@@ -4,15 +4,22 @@
 #include <QDateTime>
 #include <QTimer>
 #include <QUrl>
+#include <QMap>
+#include <QList>
 #include <chrono>
 #include <functional>
 #include <memory>
 
 namespace TeraguchiStudio {
+struct Workstation {
+    QString hostId;
+    QList<QByteArray> certificates;
+};
 struct Profile {
     QString label, suffix;
     qint64 revision = 0, issued = 0, expires = 0;
     QByteArray digest;
+    QMap<QString, Workstation> workstations;
 };
 struct Permit {
     Profile profile;

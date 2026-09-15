@@ -32,6 +32,10 @@ QtObject {
     function finishPreparation() {
         if (!assignments.resolveLoginTarget(token, preparingNodeId)) { assignments.flow.invalidateCatalog(); cancel(); return; }
         var resolved = computers.assignedLoginTarget(assignments.provider, preparingNodeId);
+        if (resolved && resolved.trustError) {
+            assignments.flow.block(qsTr("Workstation verification needed"), resolved.trustError);
+            cancel(); return;
+        }
         if (!resolved || !resolved.computerId || !resolved.hostId) return;
         target = resolved;
         target.displayToken = displayToken;

@@ -4,6 +4,7 @@
 #include "nvaddress.h"
 #include "outputtopology.h"
 #include "macpreviewlaunch.h"
+#include "teraguchi/hosttrust.h"
 
 #include <Limelight.h>
 
@@ -146,6 +147,7 @@ public:
     void setAddress(NvAddress address);
 
     void setPlankSessionToken(QString sessionToken);
+    void setHostTrust(TeraguchiStudio::HostLease trust, std::function<bool()> permitted = {});
 
     QString authenticate(QString username, QString password, bool* greeterConfirmed = nullptr);
     bool probeWorkerReplacement(const QString& instance, const QString& certificateSha256);
@@ -216,6 +218,11 @@ private:
     QJsonObject postPinnedMacJson(const QString& path, const QJsonObject& body,
                                  const QString& certificateSha256);
 
+    QNetworkReply* pinnedRequest(QNetworkRequest request, const QByteArray& body, bool post, int timeoutMs);
+    bool hostRequestPermitted(const QUrl& url) const;
+    TeraguchiStudio::HostLease m_HostTrust;
+    std::function<bool()> m_HostRequestPermitted;
+    QByteArray m_LastPinnedCertificate;
     NvAddress m_Address;
     QNetworkAccessManager* m_Nam;
     QString m_SessionToken;

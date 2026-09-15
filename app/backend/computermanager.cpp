@@ -677,7 +677,7 @@ public:
     PendingAuthenticationTask(ComputerManager* computerManager, NvComputer* computer,
                               QString username, QString password, QString matchedDesktopMode,
                               NvAddress expectedAddress, QString expectedServerUuid, QString requestId,
-                              std::shared_ptr<AssignedAuthentication> assigned)
+                              std::shared_ptr<AssignedAuthentication> assigned, TeraguchiStudio::HostLease hostTrust)
         : m_ComputerManager(computerManager),
           m_Computer(computer),
           m_Username(std::move(username)),
@@ -685,7 +685,7 @@ public:
           m_MatchedDesktopMode(std::move(matchedDesktopMode)),
           m_ExpectedAddress(std::move(expectedAddress)),
           m_ExpectedServerUuid(std::move(expectedServerUuid)),
-          m_Assigned(std::move(assigned))
+          m_Assigned(std::move(assigned)), m_HostTrust(std::move(hostTrust))
     {
         connect(this, &PendingAuthenticationTask::authenticationCompleted,
                 computerManager, [computerManager, requestId](NvComputer* target, const QString& error) {
@@ -726,6 +726,13 @@ private:
                 address = m_ExpectedAddress.isNull() ? m_Computer->activeAddress : m_ExpectedAddress;
             }
             NvHTTP http(address);
+            if (m_Assigned) {
+                if (!m_HostTrust || !m_HostTrust->valid() || m_HostTrust->hostId != m_ExpectedServerUuid)
+                    throw GfeHttpResponseException(401, "Trusted workstation setup is required before sign-in");
+                http.setHostTrust(m_HostTrust, [state = m_Assigned] {
+                    QMutexLocker lock(&state->lock); return !state->cancelled;
+                });
+            }
             if (!m_ExpectedAddress.isNull()) {
                 const auto info = http.getServerInfo(NvHTTP::NVLL_NONE, true);
                 if (NvHTTP::getXmlString(info, "uniqueid") != m_ExpectedServerUuid)
@@ -761,6 +768,7 @@ private:
                 if (m_Assigned->cancelled) return;
                 QReadLocker computerLock(&m_Computer->lock);
                 auto result = std::make_unique<NvComputer>(*m_Computer);
+                result->assignedHostTrust = m_HostTrust;
                 result->sessionToken = token;
                 result->authorizationState = NvComputer::AS_AUTHORIZED;
                 if (topologySupported) result->outputTopology = topology;
@@ -810,11 +818,12 @@ private:
     NvAddress m_ExpectedAddress;
     QString m_ExpectedServerUuid;
     std::shared_ptr<AssignedAuthentication> m_Assigned;
+    TeraguchiStudio::HostLease m_HostTrust;
 };
 
 void ComputerManager::authenticateHost(NvComputer* computer, QString username,
                                        QString password, NvAddress expectedAddress,
-                                       QString expectedServerUuid, QString requestId)
+                                       QString expectedServerUuid, QString requestId, TeraguchiStudio::HostLease hostTrust)
 {
     QString matchedMode;
     bool matchMac;
@@ -857,7 +866,7 @@ void ComputerManager::authenticateHost(NvComputer* computer, QString username,
     }
     PendingAuthenticationTask* authentication = new PendingAuthenticationTask(
         this, computer, std::move(username), std::move(password), matchedMode,
-        std::move(expectedAddress), std::move(expectedServerUuid), std::move(requestId), std::move(assigned));
+        std::move(expectedAddress), std::move(expectedServerUuid), std::move(requestId), std::move(assigned), std::move(hostTrust));
     QThreadPool::globalInstance()->start(authentication);
 }
 

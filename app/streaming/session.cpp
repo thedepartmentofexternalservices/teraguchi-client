@@ -848,6 +848,10 @@ void Session::bindAssignedTarget(TailscaleWorkstations* provider, const QVariant
     m_ComputerManager = nullptr; // Never persist session-local route/topology changes.
     m_Computer->plankHostLayout = NvOutputTopology::MatchClientHostLayout;
     m_AssignedDisplayCount = displays;
+    if (!m_Computer->assignedHostTrust || m_Computer->assignedHostTrust->setup != m_StudioPermit ||
+            m_Computer->assignedHostTrust->nodeId != target.value("id").toString() ||
+            m_Computer->assignedHostTrust->hostId != target.value("hostId").toString())
+        m_DisconnectRequested.store(true);
     m_AllowActiveSessionTakeover = false;
     m_AssignmentWatch = std::make_unique<AssignmentWatch>(provider->studioDnsSuffix(), target, provider->remainingValidityMs(), QString(), QStringList(), m_StudioPermit);
     connect(m_AssignmentWatch.get(), &AssignmentWatch::assignmentRemoved, this, [this] {
@@ -859,8 +863,10 @@ void Session::bindAssignedTarget(TailscaleWorkstations* provider, const QVariant
 void Session::validateAssignedEndpoint()
 {
     if (!m_AssignmentWatch) return;
-    if (!m_StudioPermit || !m_StudioPermit->valid())
-        throw GfeHttpResponseException(401, "Studio setup expired; import a current setup file");
+    if (!m_StudioPermit || !m_StudioPermit->valid() || !m_Computer->assignedHostTrust ||
+            m_Computer->assignedHostTrust->setup != m_StudioPermit || !m_Computer->assignedHostTrust->valid() ||
+            m_Computer->assignedHostTrust->hostId != m_Computer->serverUuid)
+        throw GfeHttpResponseException(401, "Trusted workstation setup expired or changed; import a current setup file");
     if (!MacDisplayBinding::current(m_AssignedDisplays))
         throw GfeHttpResponseException(401, "Selected displays changed; start a new connection");
     if (!MacInputAccess::query().ready())
@@ -869,6 +875,9 @@ void Session::validateAssignedEndpoint()
         throw GfeHttpResponseException(401, "Workstation assignment needs a fresh check");
     // Use a credential-free probe before any session-token or PAM request.
     NvHTTP probe(m_Computer->activeAddress);
+    probe.setHostTrust(m_Computer->assignedHostTrust, [this] {
+        return !m_DisconnectRequested.load() && m_AssignmentWatch && m_AssignmentWatch->permitsConnection();
+    });
     const auto info = probe.getServerInfo(NvHTTP::NVLL_NONE, true);
     if (NvHTTP::getXmlString(info, "uniqueid") != m_Computer->serverUuid) {
         requestDisconnect();
@@ -2895,6 +2904,9 @@ bool Session::startConnectionAsync(bool reconnecting,
 
     try {
         std::unique_ptr<NvHTTP> http = std::make_unique<NvHTTP>(m_Computer);
+        if (m_AssignmentWatch) http->setHostTrust(m_Computer->assignedHostTrust, [this] {
+            return !m_DisconnectRequested.load() && m_AssignmentWatch->permitsConnection();
+        });
         const QString captureSource =
                 m_PlankCaptureSource == StreamingPreferences::PLANK_CAPTURE_SCREENCAPTUREKIT ?
                     QStringLiteral("screencapturekit") :
@@ -3447,6 +3459,9 @@ bool Session::runPlankReconnect()
                 m_Computer->currentGameId = 0;
             }
             NvHTTP http(m_Computer);
+            if (m_AssignmentWatch) http.setHostTrust(m_Computer->assignedHostTrust, [this] {
+                return !m_DisconnectRequested.load() && m_AssignmentWatch->permitsConnection();
+            });
             validateAssignedEndpoint();
             bool greeterConfirmed = false;
             const QString token = http.authenticate(
