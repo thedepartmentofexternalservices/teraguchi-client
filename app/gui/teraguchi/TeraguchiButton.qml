@@ -8,25 +8,28 @@ Button {
     TeraguchiTheme {
         id: theme
     }
-    implicitHeight: 44
-    implicitWidth: Math.max(110, contentItem.implicitWidth + 32)
-    leftPadding: 16
-    rightPadding: 16
+    implicitHeight: 48
+    implicitWidth: Math.max(120, contentItem.implicitWidth + 40)
+    leftPadding: 20
+    rightPadding: 20
     focusPolicy: Qt.StrongFocus
     hoverEnabled: true
     Accessible.name: text
+    readonly property bool inverted: enabled && (primary ? !(hovered || down) : hovered || down)
     background: Rectangle {
         radius: theme.radius
-        color: !control.enabled ? (control.selected ? "#314339" : theme.panel) : control.primary ? theme.accent : control.down || control.hovered ? theme.hover : theme.raised
-        border.width: control.activeFocus ? 2 : 1
-        border.color: control.activeFocus ? theme.accent : theme.stroke
+        color: control.inverted ? theme.text : theme.canvas
+        border.width: control.activeFocus || control.selected ? 2 : 1
+        border.color: control.activeFocus || control.selected ? theme.accent : control.enabled ? theme.text : theme.stroke
     }
     contentItem: Text {
-        text: control.text
+        text: control.text.toUpperCase()
         textFormat: Text.PlainText
-        color: !control.enabled ? (control.selected ? theme.accent : theme.quiet) : control.primary ? theme.accentInk : theme.text
-        font.pixelSize: 14
-        font.weight: Font.DemiBold
+        color: control.inverted ? theme.canvas : control.enabled || control.selected ? theme.text : theme.quiet
+        font.family: theme.sans
+        font.pixelSize: 12
+        font.weight: Font.Medium
+        font.letterSpacing: 1.1
         horizontalAlignment: Text.AlignHCenter
         verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight

@@ -9,13 +9,23 @@ The existing installed client and its bookmarks are unchanged.
 - `WorkstationPicker.qml`: assigned list, availability, display selection,
   connection/recovery actions and expandable details.
 - `WorkstationFlow.qml`: presentation state and an asynchronous adapter boundary.
-- `TeraguchiButton.qml` and `TeraguchiTheme.qml`: shared preview controls and colors.
+- `TeraguchiButton.qml`, `TeraguchiDisplayChoice.qml`, `TeraguchiScrollBar.qml`:
+  square controls, visual display selection and scrolling.
+- `TeraguchiTheme.qml`: 1986 Studios Coolant color and typography tokens.
 
 Use the root `scripts/test/check-workstation-ui.sh` with pinned Qt 6.10.2 to
 compile, test and render the preview. The root documentation records exact
 source commits and qualification limits. Alan Latteri's PLANK remains the
 client/host foundation; no Replay, transport or authentication code is copied.
-The wordmark and monogram here are design proposals, not final package artwork.
+The Coolant wordmark is a design proposal, not final package artwork.
+
+The visual source is the supplied 1986 Studios Coolant design system's README
+and `colors_and_type.css`. The theme uses its current cyan palette, not the
+older orange reference in its skill metadata. Archivo, Archivo Black and
+JetBrains Mono are used when installed; Helvetica Neue/Archivo and Menlo are
+explicit fallbacks. No remote fonts or brand images are loaded. Bundle licensed
+fonts and their notices before claiming this design is portable to clean Macs.
+The root design notes record the token mapping and qualification limits.
 
 ## Adapter contract
 
