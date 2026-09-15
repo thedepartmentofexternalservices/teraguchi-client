@@ -3,6 +3,25 @@
 #include <QRect>
 
 namespace MacPresentationWindows {
+inline bool needsHiddenSystemUi(bool fullscreen, SDL_WindowFlags primary, SDL_WindowFlags secondary)
+{
+    const auto combined = primary | secondary;
+    return fullscreen && (combined & SDL_WINDOW_INPUT_FOCUS) &&
+        !(combined & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED));
+}
+// Own only this session's presentation options. Switching away, minimizing,
+// leaving fullscreen and every cleanup path must restore the previous options.
+class SystemUiScope {
+public:
+    SystemUiScope() = default;
+    ~SystemUiScope();
+    SystemUiScope(const SystemUiScope&) = delete;
+    SystemUiScope& operator=(const SystemUiScope&) = delete;
+    bool setActive(bool active);
+private:
+    bool m_Active = false;
+    unsigned long m_PreviousOptions = 0;
+};
 // The two windows stay in the desktop space. No exclusive mode or fullscreen
 // Space: either transition must preserve both output surfaces.
 inline QRect frame(const QRect& display, bool fullscreen)

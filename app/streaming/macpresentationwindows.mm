@@ -1,6 +1,29 @@
 #include "macpresentationwindows.h"
 #import <AppKit/AppKit.h>
 
+MacPresentationWindows::SystemUiScope::~SystemUiScope()
+{
+    setActive(false);
+}
+
+bool MacPresentationWindows::SystemUiScope::setActive(bool active)
+{
+    if (!NSApp) return !active;
+    if (!active && !m_Active) return true;
+    if (active && !m_Active) m_PreviousOptions = NSApp.presentationOptions;
+    // Auto-hide still intercepts the screen edge. Keep it available to Linux
+    // while this pair has focus, without disabling app switching or Force Quit.
+    const auto options = active ?
+        (m_PreviousOptions & ~(NSApplicationPresentationAutoHideDock |
+                              NSApplicationPresentationAutoHideMenuBar |
+                              NSApplicationPresentationAutoHideToolbar)) |
+            NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar :
+        m_PreviousOptions;
+    if (NSApp.presentationOptions != options) NSApp.presentationOptions = options;
+    m_Active = active;
+    return NSApp.presentationOptions == options;
+}
+
 bool MacPresentationWindows::configure(SDL_Window* window)
 {
     if (!window) return false;

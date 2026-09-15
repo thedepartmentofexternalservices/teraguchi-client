@@ -3772,6 +3772,9 @@ void Session::exec(QWindow* qtWindow)
 
 void Session::execInternal()
 {
+#ifdef Q_OS_MACOS
+    MacPresentationWindows::SystemUiScope systemUi;
+#endif
     // Complete initialization in this deferred context to avoid
     // calling expensive functions in the constructor (during the
     // process of loading the StreamSegue).
@@ -4352,7 +4355,18 @@ void Session::execInternal()
                 m_Reconnecting.load() ? 50 :
                     (m_PlankToolbar ?
                          m_PlankToolbar->eventWaitTimeout() : 1000);
-        if (!SDL_WaitEventTimeout(&event, eventWaitTimeout)) {
+        const bool hasEvent = SDL_WaitEventTimeout(&event, eventWaitTimeout);
+#ifdef Q_OS_MACOS
+        const bool hideSystemUi = usesMacOutputPair() && m_Window && m_SecondaryWindows.size() == 1 &&
+            MacPresentationWindows::needsHiddenSystemUi(m_PresentationFullscreen,
+                SDL_GetWindowFlags(m_Window), SDL_GetWindowFlags(m_SecondaryWindows[0]));
+        if (!systemUi.setActive(hideSystemUi)) {
+            requestDisconnect();
+            emit displayLaunchError(tr("Unable to enter full screen on both displays."));
+            goto DispatchDeferredCleanup;
+        }
+#endif
+        if (!hasEvent) {
 #ifdef Q_OS_MACOS
             if (m_KeyboardInputRejected) continue;
             m_InputHandler->flushPenInput();
@@ -4978,6 +4992,9 @@ void Session::execInternal()
     }
 
 DispatchDeferredCleanup:
+#ifdef Q_OS_MACOS
+    systemUi.setActive(false);
+#endif
     if (workerProbe != nullptr) {
         // The probe has a one-second HTTP deadline and owns no Session state.
         SDL_HideWindow(m_Window);
