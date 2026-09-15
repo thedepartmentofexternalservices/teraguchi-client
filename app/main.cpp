@@ -1,5 +1,6 @@
 #include "backend/teraguchi/tailscaleworkstations.h"
 #include "backend/teraguchi/macinputpermissions.h"
+#include "backend/teraguchi/macstartuparguments.h"
 #include "backend/teraguchi/supportdiagnostics.h"
 #include <QGuiApplication>
 #include <QStyleHints>
@@ -829,7 +830,7 @@ int main(int argc, char *argv[])
 #endif
 
     GlobalCommandLineParser parser;
-    GlobalCommandLineParser::ParseResult commandLineParserResult = parser.parse(app.arguments());
+    GlobalCommandLineParser::ParseResult commandLineParserResult = parser.parse(TeraguchiStartup::arguments(app.arguments()));
     const bool workstationMode = commandLineParserResult == GlobalCommandLineParser::WorkstationsRequested;
     if (workstationMode) {
         // A separate local settings namespace protects installed PLANK bookmarks.

@@ -18,6 +18,10 @@ Dialog {
         var opened = kind === "accessibility" ? permissions.openAccessibilitySettings() : permissions.openInputMonitoringSettings();
         settingsError = opened ? "" : qsTr("Couldn't open System Settings. Open Privacy & Security from the Apple menu, then choose the permission below.");
     }
+    function requestAccess(kind) {
+        var requested = kind === "accessibility" ? permissions.requestAccessibility() : permissions.requestInputMonitoring();
+        settingsError = requested ? "" : qsTr("Couldn't request access. Open the permission's Settings panel and add this app with the + button.");
+    }
     contentItem: ColumnLayout {
         spacing: 14
         Label {
@@ -45,6 +49,13 @@ Dialog {
                 wrapMode: Text.Wrap
             }
             Button {
+                objectName: "requestAccessibility"
+                text: qsTr("Request Accessibility")
+                visible: dialog.permissions !== null && !dialog.permissions.accessibility
+                enabled: dialog.permissions !== null && dialog.permissions.supported
+                onClicked: dialog.requestAccess("accessibility")
+            }
+            Button {
                 objectName: "openAccessibility"
                 text: qsTr("Open Accessibility")
                 enabled: dialog.permissions !== null && dialog.permissions.supported
@@ -60,6 +71,13 @@ Dialog {
                 wrapMode: Text.Wrap
             }
             Button {
+                objectName: "requestInputMonitoring"
+                text: qsTr("Request Input Monitoring")
+                visible: dialog.permissions !== null && !dialog.permissions.inputMonitoring
+                enabled: dialog.permissions !== null && dialog.permissions.supported
+                onClicked: dialog.requestAccess("input-monitoring")
+            }
+            Button {
                 objectName: "openInputMonitoring"
                 text: qsTr("Open Input Monitoring")
                 enabled: dialog.permissions !== null && dialog.permissions.supported
@@ -71,7 +89,7 @@ Dialog {
             wrapMode: Text.Wrap
             text: dialog.permissions && dialog.permissions.ready ?
                 qsTr("Both permissions are allowed. Close this panel and connect when you're ready.") :
-                qsTr("Enable this app in both sections, then return and check again. If macOS asks you to quit and reopen the app, do that before connecting.")
+                qsTr("Request each missing permission, then enable this app in Settings. If it is missing, use the + button to add this copy. Reopen the app if macOS asks, then check again.")
         }
         Label {
             Layout.fillWidth: true
