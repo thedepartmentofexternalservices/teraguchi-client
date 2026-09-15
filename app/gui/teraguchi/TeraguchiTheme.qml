@@ -1,24 +1,23 @@
 import QtQuick 2.15
 
-// 1986 Studios Coolant: README.md and colors_and_type.css are the design source.
-// OKLCH accents are converted to sRGB and channel-clipped for Qt Quick colors.
+// App surfaces follow the system appearance. Controls use the macOS native style.
 QtObject {
-    readonly property color canvas: "#0A0A0A"
-    readonly property color panel: "#141414"
-    readonly property color raised: "#1A1A1A"
-    readonly property color hover: "#1A1A1A"
-    readonly property color stroke: "#4A4845"
-    readonly property color text: "#FFFFFF"
-    readonly property color muted: "#C9C7C1"
-    readonly property color quiet: "#8C8A85"
-    readonly property color accent: "#0099AF"
-    readonly property color accentInk: "#0A0A0A"
-    readonly property color azure: "#3C79D1"
-    readonly property color available: "#6FC267"
-    readonly property color bone: "#F5F4F1"
-    readonly property int radius: 0
-    // Preview uses installed faces. Packaging must supply licensed font assets.
-    readonly property string sans: Qt.fontFamilies().indexOf("Archivo") >= 0 ? "Archivo" : "Helvetica Neue"
-    readonly property string display: Qt.fontFamilies().indexOf("Archivo Black") >= 0 ? "Archivo Black" : sans
-    readonly property string mono: Qt.fontFamilies().indexOf("JetBrains Mono") >= 0 ? "JetBrains Mono" : "Menlo"
+    readonly property SystemPalette system: SystemPalette {
+        colorGroup: SystemPalette.Active
+    }
+    readonly property bool dark: Qt.styleHints.colorScheme === Qt.Dark
+    readonly property color canvas: dark ? "#1E1E1E" : "#FFFFFF"
+    readonly property color sidebar: dark ? "#282828" : "#F0F0F0"
+    readonly property color toolbar: dark ? "#303030" : "#F6F6F6"
+    readonly property color panel: dark ? "#292929" : "#F7F7F8"
+    readonly property color text: dark ? "#F2F2F2" : "#1D1D1F"
+    readonly property color muted: dark ? "#B1B1B6" : "#6E6E73"
+    readonly property color quiet: muted
+    readonly property color stroke: dark ? "#424244" : "#DDDDDF"
+    readonly property color accent: system.highlight
+    readonly property color selectedText: system.highlightedText
+    readonly property color hover: dark ? "#383838" : "#E4E4E6"
+    readonly property color available: dark ? "#32D74B" : "#248A3D"
+    readonly property string sans: Qt.application.font.family
+    readonly property int radius: 8
 }

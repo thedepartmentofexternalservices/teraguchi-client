@@ -10,22 +10,25 @@ The existing installed client and its bookmarks are unchanged.
   connection/recovery actions and expandable details.
 - `WorkstationFlow.qml`: presentation state and an asynchronous adapter boundary.
 - `TeraguchiButton.qml`, `TeraguchiDisplayChoice.qml`, `TeraguchiScrollBar.qml`:
-  square controls, visual display selection and scrolling.
-- `TeraguchiTheme.qml`: 1986 Studios Coolant color and typography tokens.
+  native-style buttons, display radio selection and scrolling.
+- `TeraguchiTheme.qml`: system font, light/dark surfaces and selection colors.
+- `TeraguchiComputerIcon.qml`: original QML workstation glyph.
 
 Use the root `scripts/test/check-workstation-ui.sh` with pinned Qt 6.10.2 to
 compile, test and render the preview. The root documentation records exact
 source commits and qualification limits. Alan Latteri's PLANK remains the
 client/host foundation; no Replay, transport or authentication code is copied.
-The Coolant wordmark is a design proposal, not final package artwork.
+The preview uses Qt Quick Controls' macOS style and the application system
+font. Set the style before loading QML; do not override native control
+backgrounds/content items. The searchable sidebar intentionally uses a Basic
+delegate. A Basic spinner avoids an optional WebP dependency in Qt's macOS
+spinner. No custom font, remote asset or copied Apple icon is required.
 
-The visual source is the supplied 1986 Studios Coolant design system's README
-and `colors_and_type.css`. The theme uses its current cyan palette, not the
-older orange reference in its skill metadata. Archivo, Archivo Black and
-JetBrains Mono are used when installed; Helvetica Neue/Archivo and Menlo are
-explicit fallbacks. No remote fonts or brand images are loaded. Bundle licensed
-fonts and their notices before claiming this design is portable to clean Macs.
-The root design notes record the token mapping and qualification limits.
+Use Cocoa and the default Mac graphics backend for native visual captures.
+Offscreen software rendering remains useful for behavior tests but does not
+paint native controls accurately. The root checker supports explicit native
+captures and records that distinction. Full product resource, lifecycle and
+accessibility integration remain open.
 
 ## Adapter contract
 
@@ -78,4 +81,5 @@ and safety checks and tracks durable jobs; QML flags are not security authority.
 A timeout must reconcile the accepted job, never blindly repeat a cycle. No
 Power off, raw cycle, Slack commands, controller address or credential is exposed.
 The root studio-power design records the full contract and implementation order.
-Only a fake provider exists in the root preview harness; no live adapter is built.
+Power telemetry is available behind Show power details; the verified-standby
+cycle explanation remains visible before Power on. Only a fake provider exists in the root preview harness; no live adapter is built.

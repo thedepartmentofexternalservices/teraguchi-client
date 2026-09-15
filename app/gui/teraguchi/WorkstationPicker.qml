@@ -1,11 +1,27 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import QtQuick.Controls.Basic as Basic
 import QtQuick.Layouts 1.15
 
 Rectangle {
     id: page
     required property WorkstationFlow flow
     property bool detailsOpen: false
+    property bool powerDetailsOpen: false
+    property string searchText: ""
+    readonly property var visibleWorkstations: flow.workstations.filter(function (host) {
+        return host.name.toLowerCase().indexOf(searchText.trim().toLowerCase()) >= 0;
+    })
+    function chooseAdjacent(delta) {
+        if (!flow.canChoose || (powerEnabled && studioPower.pending))
+            return;
+        var index = visibleWorkstations.findIndex(function (host) {
+            return host.id === flow.selectedId;
+        });
+        var next = Math.max(0, Math.min(visibleWorkstations.length - 1, index + delta));
+        if (visibleWorkstations.length)
+            flow.selectWorkstation(visibleWorkstations[next].id);
+    }
     // Optional managed studio adapter. Absent in a standard installation.
     // It supplies presentation reports; server-side authorization still decides.
     property QtObject studioPower: null
@@ -82,6 +98,8 @@ Rectangle {
         return qsTr("Refresh to check whether this workstation is available.");
     }
     function heading() {
+        if (powerVisible)
+            return flow.selected.name;
         if (flow.phase === "checking")
             return qsTr("Checking your connection");
         if (flow.phase === "connecting")
@@ -95,6 +113,8 @@ Rectangle {
         return flow.selected ? flow.selected.name : flow.workstations.length === 0 ? qsTr("Your workstation will appear here") : qsTr("Choose a workstation");
     }
     function description() {
+        if (powerVisible)
+            return powerDescription();
         if (flow.phase === "checking")
             return qsTr("Confirming access, picture requirements, and your selected displays.");
         if (flow.phase === "connecting")
@@ -105,467 +125,242 @@ Rectangle {
             return qsTr("The client lost its connection. Try reconnecting to the same workstation, or return to the list.");
         if (flow.phase === "blocked")
             return flow.problem;
-        if (powerVisible)
-            return powerDescription();
         return flow.selected ? statusHelp(flow.selected.status) : qsTr("Only workstations assigned to you appear here. Contact your studio administrator if one is missing.");
     }
 
-    readonly property bool compact: width < 1000
+    readonly property bool compact: width < 850
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: page.compact ? 24 : 32
-        spacing: page.compact ? 20 : 24
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 24
-            Label {
-                text: "TERAGUCHI"
-                color: theme.text
-                font.family: theme.display
-                font.pixelSize: page.compact ? 20 : 22
-                font.letterSpacing: -0.4
-            }
-            Item {
-                Layout.fillWidth: true
-            }
-            ColumnLayout {
-                spacing: 8
-                Label {
-                    Layout.alignment: Qt.AlignRight
-                    text: qsTr("REMOTE WORKSTATIONS")
-                    color: theme.muted
-                    font.family: theme.mono
-                    font.pixelSize: 10
-                    font.letterSpacing: 1
-                }
-                Label {
-                    Layout.alignment: Qt.AlignRight
-                    text: qsTr("01 / CONNECT")
-                    color: theme.text
-                    font.family: theme.mono
-                    font.pixelSize: 11
-                }
-            }
-        }
+        spacing: 0
         Rectangle {
             Layout.fillWidth: true
-            height: 1
-            color: theme.text
-        }
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            spacing: page.compact ? 24 : 32
-            ColumnLayout {
-                Layout.preferredWidth: page.compact ? 208 : 248
-                Layout.fillHeight: true
-                spacing: 16
-                RowLayout {
-                    Layout.fillWidth: true
-                    Label {
-                        text: qsTr("WORKSTATIONS")
-                        color: theme.text
-                        font.family: theme.sans
-                        font.pixelSize: 12
-                        font.letterSpacing: 1.4
-                        font.weight: Font.Medium
-                    }
-                    Item {
-                        Layout.fillWidth: true
-                    }
-                    Label {
-                        text: (flow.workstations.length < 10 ? "0" : "") + flow.workstations.length
-                        color: theme.quiet
-                        font.family: theme.mono
-                        font.pixelSize: 12
-                    }
+            implicitHeight: 48
+            color: theme.toolbar
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 16
+                anchors.rightMargin: 16
+                spacing: 12
+                Label {
+                    text: "Teraguchi"
+                    font.family: theme.sans
+                    font.pixelSize: 15
+                    font.weight: Font.DemiBold
+                    color: theme.text
                 }
                 Label {
-                    text: qsTr("Assigned to you")
+                    text: qsTr("Workstations")
+                    font.pixelSize: 13
                     color: theme.muted
-                    font.family: theme.sans
-                    font.pixelSize: 12
                 }
-                ListView {
-                    id: list
-                    objectName: "workstationList"
+                Item {
                     Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    spacing: 0
-                    model: flow.workstations
-                    ScrollBar.vertical: TeraguchiScrollBar {}
-                    delegate: ItemDelegate {
-                        id: row
-                        required property var modelData
-                        required property int index
-                        readonly property bool chosen: flow.selectedId === modelData.id
-                        readonly property color ink: chosen ? theme.canvas : theme.text
-                        objectName: "host-" + modelData.id
-                        width: ListView.view.width
-                        height: page.powerEnabled ? 52 : 80
-                        leftPadding: 16
-                        rightPadding: 16
-                        enabled: flow.canChoose && !(page.powerEnabled && page.studioPower.pending)
-                        hoverEnabled: true
-                        focusPolicy: Qt.StrongFocus
-                        Accessible.name: modelData.name + ", " + page.workstationStatus(modelData)
-                        onClicked: flow.selectWorkstation(modelData.id)
-                        background: Rectangle {
-                            color: row.chosen ? theme.bone : row.hovered ? theme.hover : theme.canvas
-                            border.width: row.activeFocus ? 2 : 0
-                            border.color: theme.accent
-                            Rectangle {
-                                width: 3
-                                anchors.top: parent.top
-                                anchors.bottom: parent.bottom
-                                color: theme.accent
-                                visible: row.chosen
-                            }
-                            Rectangle {
-                                anchors.bottom: parent.bottom
-                                width: parent.width
-                                height: 1
-                                color: theme.stroke
-                                visible: !row.chosen && !row.activeFocus
-                            }
-                        }
-                        contentItem: RowLayout {
-                            spacing: 14
-                            Label {
-                                Layout.alignment: Qt.AlignTop
-                                Layout.topMargin: 12
-                                text: (row.index < 9 ? "0" : "") + (row.index + 1)
-                                color: row.chosen ? theme.stroke : theme.quiet
-                                font.family: theme.mono
-                                font.pixelSize: 10
-                            }
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: page.powerEnabled ? 4 : 8
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: row.modelData.name
-                                    textFormat: Text.PlainText
-                                    elide: Text.ElideRight
-                                    color: row.ink
-                                    font.family: theme.sans
-                                    font.pixelSize: 17
-                                    font.weight: Font.Bold
-                                }
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: page.workstationStatus(row.modelData)
-                                    color: row.chosen ? theme.stroke : theme.muted
-                                    font.family: theme.sans
-                                    font.pixelSize: 12
-                                    elide: Text.ElideRight
-                                }
-                            }
-                            Label {
-                                text: row.chosen ? "→" : ""
-                                color: row.ink
-                                font.family: theme.sans
-                                font.pixelSize: 20
-                            }
-                        }
-                    }
-                    Label {
-                        anchors.fill: parent
-                        visible: flow.workstations.length === 0
-                        text: qsTr("No workstations assigned yet.")
-                        wrapMode: Text.WordWrap
-                        color: theme.muted
-                        font.family: theme.sans
-                        font.pixelSize: 14
-                    }
                 }
                 TeraguchiButton {
                     objectName: "refreshButton"
-                    text: qsTr("Refresh status")
-                    Layout.fillWidth: true
+                    text: qsTr("Refresh")
                     enabled: !flow.busy && !flow.sessionOpen && !(page.powerEnabled && page.studioPower.pending)
                     onClicked: {
                         flow.refresh();
                         if (page.powerEnabled && flow.selected && !page.studioPower.pending)
                             page.studioPower.requestRefresh(flow.selectedId);
                     }
+                    Accessible.description: qsTr("Refresh workstation availability")
                 }
             }
             Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width
+                height: 1
+                color: theme.stroke
+            }
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 0
+            Rectangle {
+                Layout.preferredWidth: page.compact ? 212 : 236
                 Layout.fillHeight: true
+                color: theme.sidebar
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 12
+                    spacing: 12
+                    TextField {
+                        id: search
+                        objectName: "workstationSearch"
+                        Layout.fillWidth: true
+                        placeholderText: qsTr("Search workstations")
+                        font.pixelSize: 13
+                        text: page.searchText
+                        onTextEdited: page.searchText = text
+                        Accessible.name: qsTr("Search assigned workstations")
+                    }
+                    Label {
+                        Layout.leftMargin: 8
+                        text: qsTr("Assigned to you")
+                        color: theme.muted
+                        font.pixelSize: 12
+                        font.weight: Font.DemiBold
+                    }
+                    ListView {
+                        id: list
+                        objectName: "workstationList"
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        spacing: 2
+                        model: page.visibleWorkstations
+                        currentIndex: page.visibleWorkstations.findIndex(function (host) {
+                            return host.id === flow.selectedId;
+                        })
+                        onCurrentIndexChanged: if (currentIndex >= 0)
+                            positionViewAtIndex(currentIndex, ListView.Contain)
+                        ScrollBar.vertical: TeraguchiScrollBar {}
+                        delegate: Basic.ItemDelegate {
+                            id: row
+                            required property var modelData
+                            readonly property bool chosen: flow.selectedId === modelData.id
+                            objectName: "host-" + modelData.id
+                            width: ListView.view.width
+                            height: 48
+                            padding: 8
+                            enabled: flow.canChoose && !(page.powerEnabled && page.studioPower.pending)
+                            hoverEnabled: true
+                            focusPolicy: Qt.StrongFocus
+                            Accessible.name: modelData.name + ", " + page.workstationStatus(modelData)
+                            onClicked: flow.selectWorkstation(modelData.id)
+                            Keys.onDownPressed: page.chooseAdjacent(1)
+                            Keys.onUpPressed: page.chooseAdjacent(-1)
+                            background: Rectangle {
+                                radius: 6
+                                color: row.chosen ? theme.accent : row.hovered ? theme.hover : "transparent"
+                                border.width: row.activeFocus && !row.chosen ? 2 : 0
+                                border.color: theme.accent
+                            }
+                            contentItem: RowLayout {
+                                spacing: 8
+                                TeraguchiComputerIcon {
+                                    ink: row.chosen ? theme.selectedText : theme.muted
+                                    Layout.preferredWidth: 24
+                                    Layout.preferredHeight: 24
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 3
+                                    Label {
+                                        Layout.fillWidth: true
+                                        text: row.modelData.name
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideRight
+                                        color: row.chosen ? theme.selectedText : theme.text
+                                        font.pixelSize: 13
+                                        font.weight: row.chosen ? Font.DemiBold : Font.Normal
+                                    }
+                                    Label {
+                                        Layout.fillWidth: true
+                                        text: page.workstationStatus(row.modelData)
+                                        color: row.chosen ? theme.selectedText : theme.muted
+                                        font.pixelSize: 11
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                            }
+                        }
+                        Label {
+                            anchors.fill: parent
+                            anchors.margins: 8
+                            visible: list.count === 0
+                            text: flow.workstations.length === 0 ? qsTr("No workstations assigned") : qsTr("No matching workstations")
+                            wrapMode: Text.WordWrap
+                            color: theme.muted
+                            font.pixelSize: 12
+                        }
+                    }
+                    Label {
+                        Layout.leftMargin: 8
+                        text: flow.workstations.length === 1 ? qsTr("1 workstation") : qsTr("%1 workstations").arg(flow.workstations.length)
+                        color: theme.muted
+                        font.pixelSize: 11
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 8
+                        text: qsTr("Built on Alan Latteri's PLANK")
+                        color: theme.muted
+                        font.pixelSize: 10
+                        wrapMode: Text.WordWrap
+                    }
+                }
+            }
+            Rectangle {
                 width: 1
+                Layout.fillHeight: true
                 color: theme.stroke
             }
             ColumnLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                Layout.margins: page.compact ? 20 : 24
                 spacing: 16
-                ScrollView {
-                    id: contentScroll
-                    objectName: "connectionScroll"
-                    rightPadding: 14
-                    ScrollBar.vertical: TeraguchiScrollBar {
-                        objectName: "connectionScrollBar"
-                        parent: contentScroll
-                        x: contentScroll.width - width
-                        y: contentScroll.topPadding
-                        height: contentScroll.availableHeight
-                    }
+                RowLayout {
+                    id: selectionHeader
                     Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    contentWidth: availableWidth
+                    spacing: 16
+                    TeraguchiComputerIcon {
+                        visible: flow.selected !== null
+                        Layout.preferredWidth: 32
+                        Layout.preferredHeight: 32
+                        scale: 1.2
+                        ink: theme.muted
+                    }
                     ColumnLayout {
-                        width: contentScroll.availableWidth
-                        spacing: 16
-                        RowLayout {
-                            Layout.fillWidth: true
-                            Label {
-                                Layout.fillWidth: true
-                                text: flow.selected && flow.phase !== "idle" ? flow.selected.name : qsTr("CONNECT TO YOUR DESK")
-                                textFormat: Text.PlainText
-                                color: theme.muted
-                                font.family: theme.mono
-                                font.pixelSize: 10
-                                font.letterSpacing: 1
-                                elide: Text.ElideRight
-                            }
-                            Rectangle {
-                                width: 6
-                                height: 6
-                                visible: flow.selected !== null
-                                color: flow.phase === "blocked" || flow.phase === "interrupted" ? theme.azure : flow.selected && flow.selected.status === "ready" ? theme.available : theme.quiet
-                            }
-                            Label {
-                                visible: flow.selected !== null
-                                text: page.powerVisible ? page.powerLabel(page.powerReport).toUpperCase() : flow.phase === "idle" && flow.selected ? page.statusText(flow.selected.status).toUpperCase() : flow.phase.toUpperCase()
-                                color: theme.muted
-                                font.family: theme.mono
-                                font.pixelSize: 10
-                            }
-                        }
+                        Layout.fillWidth: true
+                        spacing: 6
                         Label {
                             objectName: "flowHeading"
                             Layout.fillWidth: true
                             text: page.heading()
                             textFormat: Text.PlainText
                             color: theme.text
-                            font.family: theme.display
-                            font.pixelSize: page.compact ? 32 : 44
-                            font.letterSpacing: -1
+                            font.pixelSize: 20
+                            font.weight: Font.DemiBold
                             wrapMode: Text.WordWrap
                             Accessible.role: Accessible.Heading
                         }
-                        Label {
-                            objectName: "flowDescription"
-                            Layout.fillWidth: true
-                            text: page.description()
-                            textFormat: Text.PlainText
-                            color: theme.muted
-                            font.family: theme.sans
-                            font.pixelSize: 14
-                            lineHeight: 1.35
-                            wrapMode: Text.WordWrap
-                        }
-                        Rectangle {
-                            objectName: "studioPowerPanel"
-                            Layout.fillWidth: true
-                            visible: page.powerVisible
-                            color: theme.panel
-                            implicitHeight: powerColumn.implicitHeight + 40
-                            ColumnLayout {
-                                id: powerColumn
-                                anchors.fill: parent
-                                anchors.margins: 20
-                                spacing: 20
-                                Label {
-                                    text: qsTr("WORKSTATION POWER")
-                                    color: theme.text
-                                    font.family: theme.sans
-                                    font.pixelSize: 12
-                                    font.letterSpacing: 1.2
-                                }
-                                Row {
-                                    Layout.fillWidth: true
-                                    spacing: 32
-                                    Column {
-                                        width: 160
-                                        spacing: 8
-                                        visible: typeof page.powerReport.outlet === "string"
-                                        Label {
-                                            text: qsTr("OUTLET")
-                                            color: theme.muted
-                                            font.family: theme.mono
-                                            font.pixelSize: 10
-                                        }
-                                        Label {
-                                            objectName: "outletPowerLabel"
-                                            text: page.powerReport.fresh !== true ? qsTr("Unknown") : page.powerReport.outlet === "on" ? qsTr("On") : page.powerReport.outlet === "off" ? qsTr("Off") : qsTr("Unknown")
-                                            color: theme.text
-                                            font.family: theme.sans
-                                            font.pixelSize: 22
-                                        }
-                                    }
-                                    Column {
-                                        width: 160
-                                        spacing: 8
-                                        Label {
-                                            text: qsTr("WORKSTATION")
-                                            color: theme.muted
-                                            font.family: theme.mono
-                                            font.pixelSize: 10
-                                        }
-                                        Label {
-                                            objectName: "machinePowerLabel"
-                                            text: page.powerReport.fresh !== true ? qsTr("Unknown") : ["off", "standby"].indexOf(page.powerReport.state) >= 0 ? qsTr("Off") : page.powerReport.state === "starting" ? qsTr("Starting") : page.powerReport.state === "online" ? qsTr("On") : qsTr("Unknown")
-                                            color: theme.text
-                                            font.family: theme.sans
-                                            font.pixelSize: 22
-                                        }
-                                    }
-                                }
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: page.powerReport.state === "standby" && page.powerReport.fresh === true ? qsTr("Your studio verified the workstation is off. Starting it may briefly cycle its power outlet.") : qsTr("Power status and remote connection status are checked separately.")
-                                    color: theme.muted
-                                    font.family: theme.sans
-                                    font.pixelSize: 12
-                                    wrapMode: Text.WordWrap
-                                }
+                        RowLayout {
+                            visible: flow.selected !== null
+                            spacing: 6
+                            Rectangle {
+                                width: 6
+                                height: 6
+                                radius: 3
+                                color: flow.selected && flow.selected.status === "ready" ? theme.available : theme.muted
                             }
-                        }
-                        Rectangle {
-                            Layout.fillWidth: true
-                            implicitHeight: profileColumn.implicitHeight + 40
-                            color: theme.panel
-                            visible: flow.selected !== null && !page.powerVisible
-                            ColumnLayout {
-                                id: profileColumn
-                                anchors.fill: parent
-                                anchors.margins: 20
-                                spacing: 12
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Label {
-                                        text: qsTr("DISPLAY LAYOUT")
-                                        color: theme.text
-                                        font.family: theme.sans
-                                        font.pixelSize: 12
-                                        font.letterSpacing: 1.2
-                                    }
-                                    Item {
-                                        Layout.fillWidth: true
-                                    }
-                                    Label {
-                                        text: qsTr("4K / 60 FPS TARGET")
-                                        color: theme.muted
-                                        font.family: theme.mono
-                                        font.pixelSize: 10
-                                    }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 12
-                                    Repeater {
-                                        model: 2
-                                        TeraguchiDisplayChoice {
-                                            required property int index
-                                            objectName: "display-" + (index + 1)
-                                            displayCount: index + 1
-                                            Layout.fillWidth: true
-                                            selected: flow.displayCount === index + 1
-                                            enabled: flow.canChoose && !(page.powerEnabled && page.studioPower.pending)
-                                            onClicked: flow.chooseDisplays(index + 1)
-                                        }
-                                    }
-                                }
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: qsTr("Required: native 10-bit · 4:4:4 · Hardware decode")
-                                    color: theme.text
-                                    font.family: theme.sans
-                                    font.pixelSize: 12
-                                    wrapMode: Text.WordWrap
-                                }
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: qsTr("Every selected display must pass the connection check.")
-                                    color: theme.muted
-                                    font.family: theme.sans
-                                    font.pixelSize: 12
-                                    wrapMode: Text.WordWrap
-                                }
-                            }
-                        }
-                        ToolButton {
-                            objectName: "detailsButton"
-                            text: page.detailsOpen ? qsTr("Hide connection details −") : qsTr("Connection details +")
-                            visible: flow.selected !== null && !page.powerVisible
-                            implicitHeight: 44
-                            focusPolicy: Qt.StrongFocus
-                            background: Rectangle {
-                                color: parent.hovered ? theme.raised : "transparent"
-                                border.width: parent.activeFocus ? 2 : 0
-                                border.color: theme.accent
-                            }
-                            contentItem: Text {
-                                text: parent.text
+                            Label {
+                                text: page.powerVisible ? page.powerLabel(page.powerReport) : flow.selected ? page.statusText(flow.selected.status) : ""
                                 color: theme.muted
-                                font.family: theme.sans
                                 font.pixelSize: 12
-                                verticalAlignment: Text.AlignVCenter
                             }
-                            onClicked: page.detailsOpen = !page.detailsOpen
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            visible: page.detailsOpen && flow.selected !== null && !page.powerVisible
-                            text: qsTr("Requested: %1 display(s), up to 4K60 each.\nRequired: native 10-bit source, HEVC RExt 4:4:4 10-bit, hardware decoding.\nConnection checks do not certify physical display output or production readiness.").arg(flow.displayCount)
-                            color: theme.muted
-                            font.family: theme.sans
-                            font.pixelSize: 12
-                            lineHeight: 1.4
-                            wrapMode: Text.WordWrap
-                        }
-                        Item {
-                            Layout.preferredHeight: 4
                         }
                     }
                 }
-                Rectangle {
+                Label {
+                    objectName: "flowDescription"
                     Layout.fillWidth: true
-                    height: 1
-                    color: theme.stroke
+                    text: page.description()
+                    textFormat: Text.PlainText
+                    color: theme.muted
+                    font.pixelSize: 13
+                    lineHeight: 1.3
+                    wrapMode: Text.WordWrap
                 }
+                // Actions stay next to the selected workstation, outside the scroll area.
                 RowLayout {
+                    id: actionRow
                     Layout.fillWidth: true
-                    spacing: 12
-                    TeraguchiButton {
-                        objectName: "powerOnButton"
-                        visible: page.powerVisible && page.canRequestPower
-                        text: qsTr("Power on")
-                        primary: true
-                        enabled: page.canRequestPower
-                        onClicked: page.requestPower()
-                    }
-                    TeraguchiButton {
-                        objectName: "powerRefreshButton"
-                        visible: page.powerVisible
-                        text: qsTr("Check status")
-                        enabled: page.powerEnabled && !page.studioPower.pending
-                        onClicked: {
-                            if (page.powerVisible && page.studioPower.pending !== true)
-                                page.studioPower.requestRefresh(flow.selectedId);
-                        }
-                    }
-                    Label {
-                        visible: page.powerVisible && page.studioPower.pending === true
-                        text: qsTr("Starting workstation…")
-                        color: theme.muted
-                        font.family: theme.sans
-                        font.pixelSize: 12
-                    }
+                    spacing: 8
                     TeraguchiButton {
                         objectName: "connectButton"
                         visible: !flow.busy && !flow.sessionOpen && !page.powerVisible
@@ -591,47 +386,238 @@ Rectangle {
                     TeraguchiButton {
                         objectName: "disconnectButton"
                         visible: flow.sessionOpen && !flow.busy
-                        text: flow.phase === "connected" ? qsTr("Disconnect") : qsTr("Return to workstations")
+                        text: qsTr("Disconnect")
                         onClicked: flow.disconnect()
+                    }
+                    TeraguchiButton {
+                        objectName: "powerOnButton"
+                        visible: page.powerVisible && page.canRequestPower
+                        text: qsTr("Power on")
+                        primary: true
+                        enabled: page.canRequestPower
+                        onClicked: page.requestPower()
+                    }
+                    TeraguchiButton {
+                        objectName: "powerRefreshButton"
+                        visible: page.powerVisible
+                        text: qsTr("Check status")
+                        enabled: page.powerEnabled && !page.studioPower.pending
+                        onClicked: if (page.powerVisible && !page.studioPower.pending)
+                            page.studioPower.requestRefresh(flow.selectedId)
+                    }
+                    // Pure-QML spinner avoids the optional Qt WebP image plugin.
+                    Basic.BusyIndicator {
+                        Layout.preferredWidth: 20
+                        Layout.preferredHeight: 20
+                        running: flow.busy || (page.powerVisible && page.studioPower.pending)
+                        visible: running
                     }
                     Item {
                         Layout.fillWidth: true
                     }
-                    BusyIndicator {
-                        implicitWidth: 32
-                        implicitHeight: 32
-                        running: flow.busy
-                        visible: running
+                }
+                ScrollView {
+                    id: contentScroll
+                    objectName: "connectionScroll"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    contentWidth: availableWidth
+                    rightPadding: 12
+                    ScrollBar.vertical: TeraguchiScrollBar {
+                        objectName: "connectionScrollBar"
+                        parent: contentScroll
+                        x: contentScroll.width - width
+                        y: contentScroll.topPadding
+                        height: contentScroll.availableHeight
+                    }
+                    ColumnLayout {
+                        width: contentScroll.availableWidth
+                        spacing: 16
+                        Rectangle {
+                            objectName: "connectionSettings"
+                            Layout.fillWidth: true
+                            visible: flow.selected !== null && !page.powerVisible
+                            color: theme.panel
+                            radius: theme.radius
+                            border.color: theme.stroke
+                            implicitHeight: settings.implicitHeight + 32
+                            ColumnLayout {
+                                id: settings
+                                anchors.fill: parent
+                                anchors.margins: 16
+                                spacing: 14
+                                Label {
+                                    text: qsTr("Connection")
+                                    color: theme.text
+                                    font.pixelSize: 13
+                                    font.weight: Font.DemiBold
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 16
+                                    Label {
+                                        text: qsTr("Displays")
+                                        font.pixelSize: 13
+                                        color: theme.muted
+                                        Layout.preferredWidth: 76
+                                    }
+                                    Repeater {
+                                        model: 2
+                                        TeraguchiDisplayChoice {
+                                            required property int index
+                                            objectName: "display-" + (index + 1)
+                                            displayCount: index + 1
+                                            selected: flow.displayCount === index + 1
+                                            enabled: flow.canChoose
+                                            onClicked: flow.chooseDisplays(index + 1)
+                                        }
+                                    }
+                                    Item {
+                                        Layout.fillWidth: true
+                                    }
+                                }
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: 1
+                                    color: theme.stroke
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 16
+                                    Label {
+                                        text: qsTr("Picture")
+                                        font.pixelSize: 13
+                                        color: theme.muted
+                                        Layout.preferredWidth: 76
+                                    }
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 5
+                                        Label {
+                                            text: qsTr("Up to 4K at 60 fps per display")
+                                            Layout.fillWidth: true
+                                            wrapMode: Text.WordWrap
+                                            font.pixelSize: 13
+                                            color: theme.text
+                                        }
+                                        Label {
+                                            text: qsTr("Native 10-bit · 4:4:4 · Hardware decoding")
+                                            Layout.fillWidth: true
+                                            wrapMode: Text.WordWrap
+                                            font.pixelSize: 12
+                                            color: theme.muted
+                                        }
+                                    }
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: qsTr("Each selected display is checked before connecting.")
+                                    font.pixelSize: 12
+                                    color: theme.muted
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+                        }
+                        Rectangle {
+                            objectName: "studioPowerPanel"
+                            Layout.fillWidth: true
+                            visible: page.powerVisible
+                            color: theme.panel
+                            radius: theme.radius
+                            border.color: theme.stroke
+                            implicitHeight: powerColumn.implicitHeight + 32
+                            ColumnLayout {
+                                id: powerColumn
+                                anchors.fill: parent
+                                anchors.margins: 16
+                                spacing: 12
+                                Label {
+                                    text: qsTr("Studio power")
+                                    font.pixelSize: 13
+                                    font.weight: Font.DemiBold
+                                    color: theme.text
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: page.powerReport.state === "standby" && page.powerReport.fresh === true ? qsTr("Starting briefly cycles this workstation's power outlet. Your studio has verified the computer is off.") : qsTr("Managed by your studio. Powering on does not connect you automatically.")
+                                    font.pixelSize: 12
+                                    color: theme.muted
+                                    wrapMode: Text.WordWrap
+                                }
+                                TeraguchiButton {
+                                    objectName: "powerDetailsButton"
+                                    text: page.powerDetailsOpen ? qsTr("Hide power details") : qsTr("Show power details")
+                                    onClicked: page.powerDetailsOpen = !page.powerDetailsOpen
+                                    Accessible.description: page.powerDetailsOpen ? qsTr("Power details expanded") : qsTr("Power details collapsed")
+                                }
+                                Row {
+                                    Layout.fillWidth: true
+                                    visible: page.powerDetailsOpen
+                                    spacing: 32
+                                    Column {
+                                        width: 140
+                                        spacing: 6
+                                        visible: typeof page.powerReport.outlet === "string"
+                                        Label {
+                                            text: qsTr("Outlet")
+                                            color: theme.muted
+                                            font.pixelSize: 12
+                                        }
+                                        Label {
+                                            objectName: "outletPowerLabel"
+                                            text: page.powerReport.fresh !== true ? qsTr("Unknown") : page.powerReport.outlet === "on" ? qsTr("On") : page.powerReport.outlet === "off" ? qsTr("Off") : qsTr("Unknown")
+                                            color: theme.text
+                                            font.pixelSize: 13
+                                        }
+                                    }
+                                    Column {
+                                        width: 140
+                                        spacing: 6
+                                        Label {
+                                            text: qsTr("Workstation")
+                                            color: theme.muted
+                                            font.pixelSize: 12
+                                        }
+                                        Label {
+                                            objectName: "machinePowerLabel"
+                                            text: page.powerReport.fresh !== true ? qsTr("Unknown") : ["off", "standby"].indexOf(page.powerReport.state) >= 0 ? qsTr("Off") : page.powerReport.state === "starting" ? qsTr("Starting") : page.powerReport.state === "online" ? qsTr("On") : qsTr("Unknown")
+                                            color: theme.text
+                                            font.pixelSize: 13
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        TeraguchiButton {
+                            objectName: "detailsButton"
+                            visible: flow.selected !== null && !page.powerVisible
+                            text: page.detailsOpen ? qsTr("Hide connection details") : qsTr("Show connection details")
+                            onClicked: page.detailsOpen = !page.detailsOpen
+                            Accessible.description: page.detailsOpen ? qsTr("Connection details expanded") : qsTr("Connection details collapsed")
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            visible: page.detailsOpen && flow.selected !== null && !page.powerVisible
+                            text: qsTr("Requested: %1 display(s), up to 4K60 each.\nRequired: native 10-bit source, HEVC RExt 4:4:4 10-bit, hardware decoding.\nConnection checks do not certify physical display output or production readiness.").arg(flow.displayCount)
+                            color: theme.muted
+                            font.pixelSize: 12
+                            lineHeight: 1.4
+                            wrapMode: Text.WordWrap
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            visible: flow.phase === "connected"
+                            text: qsTr("Disconnect keeps your desktop and applications open. Logging out inside Rocky ends the desktop session.")
+                            color: theme.muted
+                            font.pixelSize: 12
+                            wrapMode: Text.WordWrap
+                        }
+                        Item {
+                            Layout.preferredHeight: 4
+                        }
                     }
                 }
-                Label {
-                    Layout.fillWidth: true
-                    visible: flow.phase === "connected"
-                    text: qsTr("Disconnect closes this connection. Logging out inside Rocky ends your desktop session.")
-                    color: theme.muted
-                    font.family: theme.sans
-                    font.pixelSize: 12
-                    wrapMode: Text.WordWrap
-                }
-            }
-        }
-        RowLayout {
-            Layout.fillWidth: true
-            Label {
-                text: qsTr("Built on Alan Latteri's PLANK.")
-                color: theme.quiet
-                font.family: theme.sans
-                font.pixelSize: 11
-            }
-            Item {
-                Layout.fillWidth: true
-            }
-            Label {
-                text: qsTr("TERAGUCHI / DXS")
-                color: theme.muted
-                font.family: theme.mono
-                font.pixelSize: 10
-                font.letterSpacing: 1
             }
         }
     }
