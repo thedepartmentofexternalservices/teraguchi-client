@@ -7,6 +7,8 @@
 #include "mackeyboard.h"
 #include "macsystemkeys.h"
 
+#include "streaming/macclipboardsync.h"
+
 SDL_WindowID SdlInputHandler::focusedKeyboardWindow() const
 {
     for (const auto& output : m_PresentationLayout.outputs) {
@@ -96,8 +98,14 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
         // with the text we're going to type.
         raiseAllKeys();
 
-        char* text;
-        if (SDL_HasClipboardText() && (text = SDL_GetClipboardText()) != nullptr) {
+        char* text = nullptr;
+#ifdef Q_OS_MACOS
+        text = macReadGeneralPasteboardTextForSdl();
+#endif
+        if (text == nullptr && SDL_HasClipboardText()) {
+            text = SDL_GetClipboardText();
+        }
+        if (text != nullptr) {
             // Sending both CR and LF will lead to two newlines in the destination for
             // each newline in the source, so we fix up any CRLFs into just a single LF.
             for (char* c = text; *c != 0; c++) {

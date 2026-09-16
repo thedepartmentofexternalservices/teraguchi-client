@@ -28,6 +28,7 @@ class ComputerManager;
 class AssignmentWatch;
 class TailscaleWorkstations;
 class PlankToolbar;
+class MacClipboardSync;
 #ifdef PLANK_TRANSPORT
 struct PlankTransportNativeEndpoint;
 #endif
@@ -267,6 +268,14 @@ private:
                                           const unsigned char* payload,
                                           size_t payloadLength);
 #endif
+#ifdef Q_OS_MACOS
+    void startClipboardSync();
+    void stopClipboardSync();
+    void startClipboardPollTimer();
+    void stopClipboardPollTimer();
+    void queueClipboardPollEvent();
+    bool clipboardSyncEnabled() const;
+#endif
 
     bool validateLaunch(SDL_Window* testWindow);
 
@@ -493,6 +502,10 @@ private:
 
     Overlay::OverlayManager m_OverlayManager;
     std::unique_ptr<PlankToolbar> m_PlankToolbar;
+#ifdef Q_OS_MACOS
+    std::unique_ptr<MacClipboardSync> m_ClipboardSync;
+    std::uint32_t m_ClipboardPollTimerId = 0;
+#endif
     std::atomic<float> m_CurrentRenderedFps;
     std::atomic<float> m_CurrentVideoMbps;
     VideoFecLossPercent m_CurrentVideoFecLoss;
