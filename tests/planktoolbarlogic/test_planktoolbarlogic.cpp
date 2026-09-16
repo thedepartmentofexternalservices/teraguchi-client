@@ -27,6 +27,9 @@ private slots:
     void rejectsInconsistentFecCounters();
     void retainsTenSecondPeakForBothStatsViews();
     void sharesPacketLossDisplayPrecision();
+    void resolvesUnavailableNetworkRttDisplay();
+    void resolvesAvailableNetworkRttDisplay();
+    void reservesToolbarWidthForNetworkRtt();
 };
 
 void TestPlankToolbarLogic::resolvesReportedAndDerivedDensity()
@@ -53,7 +56,7 @@ void TestPlankToolbarLogic::alignsLogicalHitRectWithPhysicalSurface()
     QFETCH(float, density);
 
     constexpr int logicalWindowWidth = 4096;
-    constexpr int logicalToolbarWidth = 539;
+    constexpr int logicalToolbarWidth = PlankToolbarLogic::PreferredToolbarWidth;
     constexpr int logicalLeft = 2671;
     const int pixelWindowWidth = PlankToolbarLogic::physicalExtent(
                 logicalWindowWidth, density);
@@ -72,7 +75,7 @@ void TestPlankToolbarLogic::alignsLogicalHitRectWithPhysicalSurface()
 
 void TestPlankToolbarLogic::preservesHorizontalPositionAcrossScaleChanges()
 {
-    constexpr int toolbarWidth = 539;
+    constexpr int toolbarWidth = PlankToolbarLogic::PreferredToolbarWidth;
     constexpr int oldWindowWidth = 3840;
     constexpr int oldLeft = 2476;
     constexpr int newWindowWidth = 3072;
@@ -232,6 +235,25 @@ void TestPlankToolbarLogic::retainsTenSecondPeakForBothStatsViews()
 void TestPlankToolbarLogic::sharesPacketLossDisplayPrecision()
 {
     QCOMPARE(VideoPacketLossDisplayDecimalPlaces, 2);
+}
+
+void TestPlankToolbarLogic::resolvesUnavailableNetworkRttDisplay()
+{
+    const auto display = PlankToolbarLogic::resolveNetworkRttDisplay(0);
+    QVERIFY(!display.available);
+    QCOMPARE(display.milliseconds, 0u);
+}
+
+void TestPlankToolbarLogic::resolvesAvailableNetworkRttDisplay()
+{
+    const auto display = PlankToolbarLogic::resolveNetworkRttDisplay(42);
+    QVERIFY(display.available);
+    QCOMPARE(display.milliseconds, 42u);
+}
+
+void TestPlankToolbarLogic::reservesToolbarWidthForNetworkRtt()
+{
+    QVERIFY(PlankToolbarLogic::PreferredToolbarWidth > 539);
 }
 
 QTEST_APPLESS_MAIN(TestPlankToolbarLogic)

@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 #ifdef HAS_WAYLAND
@@ -23,7 +24,10 @@
 #endif
 
 namespace {
-constexpr int ToolbarPreferredWidth = 539;
+constexpr int ToolbarPreferredWidth = PlankToolbarLogic::PreferredToolbarWidth;
+constexpr int StatsRttLeft = 224;
+constexpr int EncoderTargetLeft = 282;
+constexpr int SliderTrackLeft = EncoderTargetLeft;
 constexpr int ToolbarHeight = 39;
 constexpr int EdgeRevealHeight = 3;
 constexpr Uint32 EdgeActivationDelayMs = 1000;
@@ -118,9 +122,11 @@ PlankToolbar::PlankToolbar(
       m_RenderedFps(0.0f),
       m_VideoMbps(0.0f),
       m_PacketLossPercent(-1.0f),
+      m_NetworkRttMs(0),
       m_LastDrawnFps(-1.0f),
       m_LastDrawnVideoMbps(-1.0f),
       m_LastDrawnPacketLossPercent(-2.0f),
+      m_LastDrawnNetworkRttMs(std::numeric_limits<std::uint32_t>::max()),
       m_HideDeadline(0),
       m_LastBitrateSendTime(0),
       m_LastBitrateChangeTime(0),
@@ -199,12 +205,16 @@ PlankToolbar::~PlankToolbar()
 }
 
 void PlankToolbar::setRenderedStats(
-        float fps, float videoMbps, float packetLossPercent)
+        float fps,
+        float videoMbps,
+        float packetLossPercent,
+        std::uint32_t networkRttMs)
 {
     m_RenderedFps = std::max(0.0f, fps);
     m_VideoMbps = std::max(0.0f, videoMbps);
     m_PacketLossPercent = packetLossPercent < 0.0f ?
                 -1.0f : qBound(0.0f, packetLossPercent, 100.0f);
+    m_NetworkRttMs = networkRttMs;
 }
 
 void PlankToolbar::setAppliedBitrate(
@@ -260,7 +270,8 @@ PlankToolbar::Action PlankToolbar::update(
             (std::fabs(m_RenderedFps - m_LastDrawnFps) >= 0.05f ||
              std::fabs(m_VideoMbps - m_LastDrawnVideoMbps) >= 0.05f ||
              std::fabs(m_PacketLossPercent -
-                       m_LastDrawnPacketLossPercent) >= 0.05f)) {
+                       m_LastDrawnPacketLossPercent) >= 0.05f ||
+             m_NetworkRttMs != m_LastDrawnNetworkRttMs)) {
         redraw();
     }
 
@@ -849,11 +860,25 @@ void PlankToolbar::redraw()
                          QString("%1%").arg(m_PacketLossPercent, 0, 'f',
                                              VideoPacketLossDisplayDecimalPlaces));
 
+    const auto networkRtt = PlankToolbarLogic::resolveNetworkRttDisplay(m_NetworkRttMs);
+    painter.setFont(labelFont);
+    painter.setPen(QColor(151, 161, 174));
+    painter.drawText(QRect(StatsRttLeft, 5, 52, 12), Qt::AlignLeft | Qt::AlignVCenter,
+                     "RTT");
+    painter.setFont(valueFont);
+    painter.setPen(networkRtt.available ? QColor(246, 248, 250) :
+                                         QColor(112, 120, 130));
+    painter.drawText(QRect(StatsRttLeft + 2, 16, 52, 17),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     networkRtt.available ?
+                         QString("%1 ms").arg(networkRtt.milliseconds) :
+                         QString("--"));
+
     QFont targetFont = labelFont;
     targetFont.setPixelSize(12);
     painter.setFont(targetFont);
     painter.setPen(m_BitrateSupported ? QColor(235, 239, 244) : QColor(135, 143, 153));
-    painter.drawText(QRect(229, 3, 190, 17), Qt::AlignLeft | Qt::AlignVCenter,
+    painter.drawText(QRect(EncoderTargetLeft, 3, 190, 17), Qt::AlignLeft | Qt::AlignVCenter,
                      QString("Encoder target  %1 Mbps").arg(m_BitrateKbps / 1000.0, 0, 'f', 1));
 
     const int trackLeft = sliderLeft() - toolbarLeft();
@@ -959,8 +984,8 @@ void PlankToolbar::redraw()
         hintFont.setPixelSize(10);
         painter.setFont(hintFont);
         painter.setPen(QColor(183, 151, 92));
-        painter.fillRect(QRect(225, 21, 198, 17), QColor(22, 27, 34));
-        painter.drawText(QRect(229, 22, 190, 15), Qt::AlignLeft | Qt::AlignVCenter,
+        painter.fillRect(QRect(EncoderTargetLeft - 4, 21, 198, 17), QColor(22, 27, 34));
+        painter.drawText(QRect(EncoderTargetLeft, 22, 190, 15), Qt::AlignLeft | Qt::AlignVCenter,
                          "Live bitrate control unavailable");
     }
 
@@ -968,6 +993,7 @@ void PlankToolbar::redraw()
     m_LastDrawnFps = m_RenderedFps;
     m_LastDrawnVideoMbps = m_VideoMbps;
     m_LastDrawnPacketLossPercent = m_PacketLossPercent;
+    m_LastDrawnNetworkRttMs = m_NetworkRttMs;
     m_LastRedrawTime = SDL_GetTicks();
     if (m_WaylandToolbar) {
         m_WaylandToolbar->setLayout(m_WindowWidth, toolbarLeft(),
@@ -1374,7 +1400,7 @@ int PlankToolbar::toolbarLeft() const
 
 int PlankToolbar::sliderLeft() const
 {
-    return toolbarLeft() + 229;
+    return toolbarLeft() + SliderTrackLeft;
 }
 
 int PlankToolbar::sliderRight() const

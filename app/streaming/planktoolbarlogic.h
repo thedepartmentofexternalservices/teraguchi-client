@@ -6,6 +6,24 @@
 
 namespace PlankToolbarLogic {
 
+inline constexpr int PreferredToolbarWidth = 591;
+
+struct NetworkRttDisplay
+{
+    bool available;
+    std::uint32_t milliseconds;
+};
+
+// Zero means no QUIC RTT sample yet. This is network round-trip time, not
+// pen-to-picture or decode latency.
+inline NetworkRttDisplay resolveNetworkRttDisplay(std::uint32_t networkRttMs)
+{
+    if (networkRttMs == 0) {
+        return {false, 0};
+    }
+    return {true, networkRttMs};
+}
+
 inline float resolvePixelDensity(float reportedDensity,
                                  int logicalWidth,
                                  int logicalHeight,
