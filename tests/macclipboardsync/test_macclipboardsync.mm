@@ -39,6 +39,7 @@ private slots:
     void sendsOnlyWithStreamFocus();
     void ignoresOffersWhileStopped();
     void validatesUnicodeScalars();
+    void applyDoesNotEchoAfterSessionReset();
 };
 
 void TestMacClipboardSync::rejectsMalformedFrameLength()
@@ -193,6 +194,29 @@ void TestMacClipboardSync::validatesUnicodeScalars()
 
     const char embeddedNull[] = {'a', '\0', 'b'};
     QVERIFY(!plank::clipboard::validUtf8(embeddedNull, sizeof(embeddedNull)));
+}
+
+void TestMacClipboardSync::applyDoesNotEchoAfterSessionReset()
+{
+    std::vector<std::vector<std::uint8_t>> sent;
+    MacClipboardSync sync(
+                [&](const std::uint8_t* data, std::size_t size) {
+                    sent.emplace_back(data, data + size);
+                    return true;
+                },
+                [] { return true; },
+                [] { return true; },
+                [] {});
+    sync.start();
+
+    const auto host = oneFrame("session text", 1);
+    QVERIFY(sync.handleHostOffer(host.data(), host.size()));
+    QVERIFY(sync.applyPendingHostTextOnMainThread());
+
+    sync.stop();
+    QVERIFY(!sync.applyPendingHostTextOnMainThread());
+    sync.pollLocalClipboardOnMainThread();
+    QVERIFY(sent.empty());
 }
 
 QTEST_MAIN(TestMacClipboardSync)

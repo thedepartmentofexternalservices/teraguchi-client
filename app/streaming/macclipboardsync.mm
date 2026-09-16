@@ -253,27 +253,39 @@ void MacClipboardSync::sendLocalClipboard(const std::string& text)
 
 bool MacClipboardSync::applyPendingHostTextOnMainThread()
 {
-    std::lock_guard<std::mutex> lock(m_StateMutex);
-    if (!m_Running || !m_PendingHostText.has_value() ||
-            m_PendingHostText->sessionEpoch != m_SessionEpoch) {
+    PendingHostText pending;
+    {
+        std::lock_guard<std::mutex> lock(m_StateMutex);
+        if (!m_Running || !m_PendingHostText.has_value() ||
+                m_PendingHostText->sessionEpoch != m_SessionEpoch) {
+            m_PendingHostText.reset();
+            return false;
+        }
+        pending = std::move(*m_PendingHostText);
         m_PendingHostText.reset();
-        return false;
+        const std::string incoming(
+                    reinterpret_cast<const char*>(pending.text.data()),
+                    pending.text.size());
+        if (incoming == m_LastAppliedHostText) {
+            return false;
+        }
+        m_ApplyingRemote = true;
     }
 
-    const auto pending = std::move(*m_PendingHostText);
-    m_PendingHostText.reset();
-    const std::string incoming(
-                reinterpret_cast<const char*>(pending.text.data()),
-                pending.text.size());
-    if (incoming == m_LastAppliedHostText) {
-        return false;
-    }
-
-    m_ApplyingRemote = true;
     writeGeneralPasteboardText(pending.text);
-    m_LastAppliedHostText = incoming;
-    m_LastPasteboardChangeCount = currentPasteboardChangeCount();
-    m_ApplyingRemote = false;
+    const auto changeCount = currentPasteboardChangeCount();
+
+    {
+        std::lock_guard<std::mutex> lock(m_StateMutex);
+        m_ApplyingRemote = false;
+        if (!m_Running || pending.sessionEpoch != m_SessionEpoch) {
+            return false;
+        }
+        m_LastAppliedHostText.assign(
+                    reinterpret_cast<const char*>(pending.text.data()),
+                    pending.text.size());
+        m_LastPasteboardChangeCount = changeCount;
+    }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Applied host clipboard offer (%zu bytes)",
                 pending.text.size());
