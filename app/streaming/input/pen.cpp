@@ -50,21 +50,10 @@ void SdlInputHandler::initializeMacPen()
             SDL_Window* target = presentationWindow(window);
             if (!target || !(SDL_GetWindowFlags(target) & SDL_WINDOW_INPUT_FOCUS)) return false;
             return Session::get()->routeMacPenToToolbar(pen, window, x, y, state, timestamp);
-        }, [] { Session::get()->resetMacPenToolbar(); },
-        [this](bool remote) {
-            if (!remote) {
-                activateCompositorCursor();
-                return;
-            }
-            // This callback runs on the SDL main thread, after the complete
-            // sample is accepted. Use the existing host cursor channel; never
-            // guess Flame margins or warp the Mac pointer feeding pen events.
-            m_TabletCursorActivationPending.store(true);
-            applyPendingTabletCursorActivation();
-#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
-            tracePenCursor("pen");
-#endif
-        });
+        }, [] { Session::get()->resetMacPenToolbar(); });
+    // Keep the immediate native cursor. Host-position cursor ownership added
+    // perceptible round-trip lag in the pilot and remains unqualified on Mac.
+
 }
 
 void SdlInputHandler::beforePenEvent(const SDL_Event& event)
