@@ -310,6 +310,8 @@ macx {
     OBJECTIVE_SOURCES += streaming/mactabletcursor.mm
     SOURCES += streaming/input/mackeyboard.cpp streaming/input/macsystemkeys.mm
     HEADERS += streaming/input/mackeyboard.h streaming/input/macsystemkeys.h
+    HEADERS += streaming/macclipboardsync.h streaming/plankclipboard.h
+    OBJECTIVE_SOURCES += streaming/macclipboardsync.mm
     LIBS += -framework ApplicationServices -framework Carbon
 }
 

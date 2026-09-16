@@ -1,5 +1,19 @@
 #include "macpresentationwindows.h"
 #import <AppKit/AppKit.h>
+#include <SDL3/SDL_log.h>
+
+void MacPresentationWindows::logDisplaySpacePolicy()
+{
+    if (!NSApp) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "PLANK macOS display spaces: AppKit unavailable");
+        return;
+    }
+    const bool separateSpaces = [NSScreen screensHaveSeparateSpaces];
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "PLANK macOS display spaces: separate=%s presentation=borderless-desktop",
+                separateSpaces ? "yes" : "no");
+}
 
 MacPresentationWindows::SystemUiScope::~SystemUiScope()
 {

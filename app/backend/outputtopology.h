@@ -59,6 +59,7 @@ struct NvOutputTopology
     static const int FixedCaptureFeature = 0x80000;
     static const int MacDesktopPreparationFeature = 0x100000;
     static const int MacEncodingProfileFeature = 0x200000;
+    static const int ClipboardSyncFeature = 0x400000;
     static const int FixedCaptureFlags = FixedCaptureFeature | OutputTopologyFeature |
             TopologyGenerationFeature | HostLayoutMetadataFeature | CompositeSourceRegionsFeature |
             MacDesktopPreparationFeature | MacEncodingProfileFeature;
@@ -81,7 +82,8 @@ struct NvOutputTopology
                                              SessionTakeoverFeature |
                                              DesktopHandoffNoticeFeature |
                                              AuthenticatedDesktopStageFeature |
-                                             WorkerInstanceFeature;
+                                             WorkerInstanceFeature |
+                                             ClipboardSyncFeature;
     static const char* NativeScalingMode;
     static const char* ScaledSpanMode;
     static const char* MatchClientHostLayout;

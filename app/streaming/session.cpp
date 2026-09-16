@@ -4,6 +4,7 @@
 #include "video/teraguchivideo.h"
 #ifdef Q_OS_MACOS
 #include "input/macpen.h"
+#include "macclipboardsync.h"
 #include "macpresentationwindows.h"
 #endif
 #include "streaming/clientframeflowtrace.h"
@@ -56,6 +57,7 @@
 #define SDL_CODE_PLANK_TABLET_CURSOR 108
 #define SDL_CODE_PLANK_CURSOR_POSITION 109
 #define SDL_CODE_PLANK_REPLANK_COMPLETE 110
+#define SDL_CODE_PLANK_CLIPBOARD 111
 
 #include <QtEndian>
 #include <QCoreApplication>
@@ -76,6 +78,7 @@
 #include "plank_transport.h"
 #include "plank_transport_control.h"
 #include "plank_transport_event.h"
+#include "plank_transport_input.h"
 #include "plank_transport_setup.h"
 #endif
 
@@ -1296,10 +1299,16 @@ void Session::startPlankTransportMediaReceivers()
     m_PlankTransportDataThread = std::thread([this]() {
         plankTransportDataReceiveLoop();
     });
+#ifdef Q_OS_MACOS
+    startClipboardSync();
+#endif
 }
 
 void Session::stopPlankTransportMediaReceivers()
 {
+#ifdef Q_OS_MACOS
+    stopClipboardSync();
+#endif
     m_PlankTransportReceiversStopping.store(true);
     if (m_PlankTransportVideoThread.joinable()) {
         m_PlankTransportVideoThread.join();
@@ -1577,6 +1586,21 @@ void Session::plankTransportDataReceiveLoop()
             LiNotifyPlankCursorPosition(
                         event.payload, event.payload_size);
             break;
+        case PLANK_TRANSPORT_EVENT_CLIPBOARD_OFFER:
+            if (event.payload_size < sizeof(PLANK_CLIPBOARD_WIRE_HEADER) ||
+                    event.payload_size > sizeof(PLANK_CLIPBOARD_WIRE_HEADER) +
+                        PLANK_CLIPBOARD_MAX_EVENT_CHUNK_SIZE) {
+                LiNotifyPlankHostTermination(-1);
+                return;
+            }
+#ifdef Q_OS_MACOS
+            if (m_ClipboardSync && clipboardSyncEnabled() &&
+                    !m_ClipboardSync->handleHostOffer(event.payload, event.payload_size)) {
+                LiNotifyPlankHostTermination(-1);
+                return;
+            }
+#endif
+            break;
         default:
             qWarning() << "Rejected unexpected native KyProto event type"
                        << event.type;
@@ -1633,6 +1657,55 @@ int Session::plankTransportNativeInputSender(void* context, uint8_t type,
     return plank_transport_native_input_send(
                 static_cast<PlankTransportNativeEndpoint*>(context), type,
                 payload, payloadLength);
+}
+#endif
+
+#ifdef Q_OS_MACOS
+bool Session::clipboardSyncEnabled() const
+{
+    return m_Computer != nullptr &&
+            (m_Computer->plankFeatureFlags & NvOutputTopology::ClipboardSyncFeature) != 0;
+}
+
+void Session::startClipboardSync()
+{
+#ifdef PLANK_TRANSPORT
+    if (!clipboardSyncEnabled() || m_PlankTransportEndpoint == nullptr) {
+        return;
+    }
+    if (!m_ClipboardSync) {
+        m_ClipboardSync = std::make_unique<MacClipboardSync>(
+                    [this](const std::uint8_t* payload, std::size_t size) {
+                        return plankTransportNativeInputSender(
+                                   m_PlankTransportEndpoint,
+                                   PLANK_TRANSPORT_INPUT_CLIPBOARD_OFFER,
+                                   payload,
+                                   size) == PLANK_TRANSPORT_OK;
+                    },
+                    [this] { return anyPresentationWindowFocused(); },
+                    [this] { return clipboardSyncEnabled(); },
+                    [this](std::vector<std::uint8_t> text) {
+                        auto* payload = new std::vector<std::uint8_t>(std::move(text));
+                        SDL_Event event {};
+                        event.type = SDL_EVENT_USER;
+                        event.user.code = SDL_CODE_PLANK_CLIPBOARD;
+                        event.user.data1 = payload;
+                        event.user.timestamp = SDL_GetTicks();
+                        if (!SDL_PushEvent(&event)) {
+                            delete payload;
+                        }
+                    });
+    }
+    m_ClipboardSync->start();
+    qInfo() << "Started PLANK clipboard sync";
+#endif
+}
+
+void Session::stopClipboardSync()
+{
+    if (m_ClipboardSync) {
+        m_ClipboardSync->stop();
+    }
 }
 #endif
 
@@ -2042,6 +2115,15 @@ bool Session::usesMacOutputPair() const
 #endif
 }
 
+bool Session::usesMacBorderlessPresentation() const
+{
+#ifdef Q_OS_MACOS
+    return m_AssignedDisplayCount >= 1 && m_AssignedDisplayCount <= 2;
+#else
+    return false;
+#endif
+}
+
 bool Session::assignedWindowsCurrent() const
 {
     if (!m_AssignedDisplayCount) return true;
@@ -2055,7 +2137,7 @@ bool Session::assignedWindowsCurrent() const
                 SDL_GetDisplayForWindow(window) != display.displayId ||
                 bounds.x != display.logicalBounds.x || bounds.y != display.logicalBounds.y ||
                 bounds.w != display.logicalBounds.w || bounds.h != display.logicalBounds.h) return false;
-        if (usesMacOutputPair() && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN)) return false;
+        if (usesMacBorderlessPresentation() && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN)) return false;
     }
     return true;
 }
@@ -2095,6 +2177,9 @@ bool Session::snapshotClientDisplays()
             m_ClientDisplays.append(snapshot);
         }
         m_UseMultiDisplayPresentation = m_AssignedDisplayCount == 2;
+#ifdef Q_OS_MACOS
+        MacPresentationWindows::logDisplaySpacePolicy();
+#endif
         return m_TargetDisplayId && MacDisplayBinding::current(m_AssignedDisplays);
     }
     const int targetIndex = getTargetDisplayIndex();
@@ -2331,8 +2416,13 @@ bool Session::anyPresentationWindowFocused() const
 void Session::setPresentationWindowsFullscreen(bool fullscreen)
 {
 #ifdef Q_OS_MACOS
-    if (usesMacOutputPair()) {
-        bool placed = m_SecondaryWindows.size() == 1 && MacDisplayBinding::current(m_AssignedDisplays);
+    if (usesMacBorderlessPresentation()) {
+        if (usesMacOutputPair() && m_SecondaryWindows.size() != 1) {
+            requestDisconnect();
+            emit displayLaunchError(tr("The second presentation window is unavailable."));
+            return;
+        }
+        bool placed = MacDisplayBinding::current(m_AssignedDisplays);
         int secondary = 0;
         for (const auto& display : m_ClientDisplays) {
             auto* window = display.displayId == m_TargetDisplayId ? m_Window : m_SecondaryWindows.value(secondary++, nullptr);
@@ -2342,20 +2432,24 @@ void Session::setPresentationWindowsFullscreen(bool fullscreen)
         }
         if (!placed) {
             requestDisconnect();
-            emit displayLaunchError(tr("Both selected displays must remain available. The session has stopped."));
+            emit displayLaunchError(usesMacOutputPair() ?
+                tr("Both selected displays must remain available. The session has stopped.") :
+                tr("The selected display must remain available. The session has stopped."));
             return;
         }
         m_PresentationFullscreen = fullscreen;
         if (m_InputHandler) m_InputHandler->setPresentationFullscreen(fullscreen);
         if (m_PlankToolbar) m_PlankToolbar->setPresentationFullscreen(fullscreen);
         rebuildPresentationLayout();
-        // Place the complete pair before showing either surface.
+        // Place every assigned output before showing any surface.
         bool shown = true;
         for (auto* window : m_SecondaryWindows) if (!SDL_ShowWindow(window)) shown = false;
         if (!SDL_ShowWindow(m_Window)) shown = false;
         if (!shown) {
             requestDisconnect();
-            emit displayLaunchError(tr("Unable to show both selected displays. The session has stopped."));
+            emit displayLaunchError(usesMacOutputPair() ?
+                tr("Unable to show both selected displays. The session has stopped.") :
+                tr("Unable to show the selected display. The session has stopped."));
         }
         return;
     }
@@ -2783,7 +2877,8 @@ void Session::updateOptimalWindowDisplayMode()
 
 void Session::toggleFullscreen()
 {
-    bool fullScreen = usesMacOutputPair() ? !m_PresentationFullscreen : !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
+    bool fullScreen = usesMacBorderlessPresentation() ? !m_PresentationFullscreen :
+            !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
 
     if (m_UseMultiDisplayPresentation) {
         SDL_LockSpinlock(&m_DecoderLock);
@@ -3884,13 +3979,14 @@ void Session::execInternal()
 
     // We always want a resizable window with High DPI enabled
     Uint32 defaultWindowFlags = SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE;
-    if (createWaylandFullscreen && !presentationMappingDeferred) {
+    if (createWaylandFullscreen && !presentationMappingDeferred &&
+            !usesMacBorderlessPresentation()) {
         // Enter compositor-native fullscreen on the initial configure. This
         // prevents SDL from binding pointer input to an intermediate windowed
         // viewport before the fullscreen surface exists.
         defaultWindowFlags |= m_FullScreenFlag;
     }
-    if (usesMacOutputPair()) defaultWindowFlags |= SDL_WINDOW_HIDDEN;
+    if (usesMacBorderlessPresentation()) defaultWindowFlags |= SDL_WINDOW_HIDDEN;
     if (presentationMappingDeferred) {
         // Decoder selection can switch the SDL window between OpenGL and
         // Vulkan. SDL implements that switch by recreating the native Wayland
@@ -4015,7 +4111,7 @@ void Session::execInternal()
         }
     }
 
-    if (!m_IsFullScreen && !usesMacOutputPair()) {
+    if (!m_IsFullScreen && !usesMacBorderlessPresentation()) {
         // Windowed means a normal compositor-managed desktop window. Do not
         // inherit a maximized launcher state that can make it indistinguishable
         // from borderless mode on Wayland.
@@ -4088,8 +4184,8 @@ void Session::execInternal()
     // for if/when we enter full-screen mode.
     updateOptimalWindowDisplayMode();
 
-    // Enter full screen if requested; a Mac pair also places both windowed outputs.
-    if (m_IsFullScreen || usesMacOutputPair()) {
+    // Enter full screen if requested; assigned Mac outputs use borderless placement.
+    if (m_IsFullScreen || usesMacBorderlessPresentation()) {
         if (presentationMappingDeferred) {
             // Keep the initial window normally sized and hidden through all
             // graphics-backend probes. Fullscreen is queued immediately before
@@ -4159,7 +4255,9 @@ void Session::execInternal()
             m_PlankToolbar.reset(new PlankToolbar(
                         m_Window, m_OverlayManager, *m_InputHandler,
                         *m_Preferences, m_PlankBitrateKbps));
-            if (usesMacOutputPair()) m_PlankToolbar->setPresentationFullscreen(m_PresentationFullscreen);
+            if (usesMacBorderlessPresentation()) {
+                m_PlankToolbar->setPresentationFullscreen(m_PresentationFullscreen);
+            }
         }
     };
     if (!presentationMappingDeferred) {
@@ -4198,6 +4296,16 @@ void Session::execInternal()
             if (m_InputHandler != nullptr) {
                 m_InputHandler->applyPendingRemoteCursorPosition();
             }
+            return true;
+        case SDL_CODE_PLANK_CLIPBOARD:
+#ifdef Q_OS_MACOS
+            if (m_ClipboardSync != nullptr && userEvent.data1 != nullptr) {
+                const auto* payload =
+                        static_cast<const std::vector<std::uint8_t>*>(userEvent.data1);
+                m_ClipboardSync->applyHostTextOnMainThread(*payload);
+                delete payload;
+            }
+#endif
             return true;
         default:
             return false;

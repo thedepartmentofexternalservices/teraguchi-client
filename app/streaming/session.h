@@ -27,6 +27,9 @@ class ComputerManager;
 class AssignmentWatch;
 class TailscaleWorkstations;
 class PlankToolbar;
+#ifdef Q_OS_MACOS
+class MacClipboardSync;
+#endif
 #ifdef PLANK_TRANSPORT
 struct PlankTransportNativeEndpoint;
 #endif
@@ -265,6 +268,11 @@ private:
                                           const unsigned char* payload,
                                           size_t payloadLength);
 #endif
+#ifdef Q_OS_MACOS
+    void startClipboardSync();
+    void stopClipboardSync();
+    bool clipboardSyncEnabled() const;
+#endif
 
     bool validateLaunch(SDL_Window* testWindow);
 
@@ -287,6 +295,7 @@ private:
 
     bool snapshotClientDisplays();
     bool usesMacOutputPair() const;
+    bool usesMacBorderlessPresentation() const;
     bool assignedWindowsCurrent() const;
 
     void rebuildPresentationLayout();
@@ -429,6 +438,7 @@ private:
     std::atomic_bool m_VideoContractRejected {false};
     std::atomic_bool m_PenInputRejected {false};
 #ifdef Q_OS_MACOS
+    std::unique_ptr<MacClipboardSync> m_ClipboardSync;
     SDL_PenID m_ToolbarPen = 0;
     SDL_PenInputFlags m_ToolbarPenButtons = 0;
     bool m_PenDisconnectRequested = false;
