@@ -462,7 +462,10 @@ macx {
 
     HEADERS += \
         streaming/macwindow.h \
-        streaming/video/ffmpeg-renderers/vt.h
+        streaming/video/ffmpeg-renderers/vt.h \
+        streaming/macclipboardsync.h \
+        streaming/plankclipboard.h
+    OBJECTIVE_SOURCES += streaming/macclipboardsync.mm
 }
 embedded {
     message(Embedded build)
