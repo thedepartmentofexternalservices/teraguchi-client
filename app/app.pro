@@ -283,6 +283,7 @@ HEADERS += \
     streaming/plankpresentation.h \
     streaming/planktoolbar.h \
     streaming/planktoolbarlogic.h \
+    streaming/plankreconnectpolicy.h \
     streaming/audio/renderers/renderer.h \
     streaming/audio/renderers/sdl.h \
     gui/computermodel.h \
@@ -478,10 +479,13 @@ macx {
     message(VideoToolbox renderer selected)
 
     SOURCES += \
+        streaming/macwindow.mm \
         streaming/video/ffmpeg-renderers/vt_base.mm \
         streaming/video/ffmpeg-renderers/vt_metal.mm
 
     HEADERS += \
+        streaming/macwindow.h \
+        streaming/macdisplaygeometry.h \
         streaming/video/ffmpeg-renderers/vt.h \
         streaming/video/ffmpeg-renderers/vt_presentation.h
 }

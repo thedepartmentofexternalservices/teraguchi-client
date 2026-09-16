@@ -1,6 +1,7 @@
 #include <QtTest>
 
 #include "outputtopology.h"
+#include "../../app/streaming/macdisplaygeometry.h"
 
 class TestOutputTopology : public QObject
 {
@@ -22,6 +23,9 @@ private slots:
     void rejectsInvalidFixedCapture();
     void recognizesDescriptionCapabilities();
     void matchesMacClientCanvas();
+    void matchesRetinaClientCanvas();
+    void matchesMacFullscreenViewport();
+    void buildsMacDisplayRequest();
 };
 
 void TestOutputTopology::reportsHeadlessHostWithoutOutputs()
@@ -45,6 +49,74 @@ void TestOutputTopology::reportsHeadlessHostWithoutOutputs()
     QVERIFY(!NvOutputTopology::fromJson(empty, topology, &error));
     QCOMPARE(error, QStringLiteral("Host reported no connected outputs"));
     QCOMPARE(topology.toJson(), before); // A diagnostic must never accept or replace topology.
+}
+
+void TestOutputTopology::matchesMacFullscreenViewport()
+{
+    for (int inset : {0, 24, 34, 38}) {
+        int logicalHeight = 1107;
+        int pixelHeight = 2214;
+        QVERIFY(MacDisplayGeometry::insetTop(1710, logicalHeight, 3420, pixelHeight, inset));
+        int scale = 0;
+        QString error;
+        const QVector<NvClientDisplay> displays = {{QRect(-1710, inset, 1710, logicalHeight),
+            QSize(3420, pixelHeight), QSize(3420, pixelHeight)}};
+        QCOMPARE(NvOutputTopology::resolveMacClientDisplayMode(displays, &error, &scale),
+                 QStringLiteral("3420x%1").arg(pixelHeight));
+        QCOMPARE(scale, 2);
+        QVERIFY(error.isEmpty());
+        const auto request = NvOutputTopology::macDisplayRequest(
+            QStringLiteral("3420x%1").arg(pixelHeight), "hevc-10-444-videotoolbox", scale);
+        QVERIFY(!request.isEmpty());
+    }
+}
+
+void TestOutputTopology::buildsMacDisplayRequest()
+{
+    QFile file(QString::fromUtf8(qgetenv("PLANK_REPO_ROOT")) + "/tests/protocol/macos-display-v3.json");
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto fixture = QJsonDocument::fromJson(file.readAll()).object();
+    QCOMPARE(NvOutputTopology::macDisplayRequest("3420x2214", "hevc-10-420-videotoolbox", 2), fixture);
+    auto manual = fixture;
+    manual["scale"] = 1;
+    manual["encoding_mode"] = "hevc-10-444-videotoolbox";
+    QCOMPARE(NvOutputTopology::macDisplayRequest("3420x2214", "hevc-10-444-videotoolbox", 1), manual);
+    QVERIFY(NvOutputTopology::macDisplayRequest("3420x2214", "hevc-10-444-videotoolbox", 3).isEmpty());
+    QVERIFY(NvOutputTopology::macDisplayRequest("3420x2214", "invalid", 2).isEmpty());
+    QVERIFY(NvOutputTopology::macDisplayRequest("3421x2214", "hevc-10-444-videotoolbox", 2).isEmpty());
+}
+
+void TestOutputTopology::matchesRetinaClientCanvas()
+{
+    int scale = 0;
+    QString error;
+    // Current compositor backing pixels, not panel-native pixels. Odd logical
+    // heights are valid when the actual encoded height remains even.
+    const QVector<NvClientDisplay> laptop = {{QRect(0,0,1710,1107), QSize(3024,1964), QSize(3420,2214)}};
+    QCOMPARE(NvOutputTopology::resolveMacClientDisplayMode(laptop, &error, &scale), QString("3420x2214"));
+    QCOMPARE(scale, 2);
+    QVERIFY(error.isEmpty());
+    QCOMPARE(NvOutputTopology::resolveMacClientDisplayMode({
+        {QRect(0,0,1920,1080), QSize(3840,2160), QSize(3840,2160)},
+        {QRect(-1710,0,1710,1107), QSize(3024,1964), QSize(3420,2214)}}, &error, &scale), QString("7260x2214"));
+    QCOMPARE(scale, 2);
+    QCOMPARE(NvOutputTopology::resolveMacClientDisplayMode({
+        {QRect(0,0,1920,1080), QSize(1920,1080), QSize(1920,1080)}}, &error, &scale), QString("1920x1080"));
+    QCOMPARE(scale, 1);
+    // Linux clients retain their existing native-pixel policy.
+    QCOMPARE(NvOutputTopology::resolveMacClientDisplayMode({
+        {QRect(0,0,1920,1080), QSize(3840,2160)}}, &error, &scale), QString("3840x2160"));
+    QCOMPARE(scale, 1);
+    QVERIFY(NvOutputTopology::resolveMacClientDisplayMode({
+        {QRect(0,0,1710,1107), QSize(3420,2214), QSize(3420,2214)},
+        {QRect(1710,0,1920,1080), QSize(1920,1080), QSize(1920,1080)}}, &error, &scale).isEmpty());
+    QVERIFY(error.contains("same 1x or 2x"));
+    QCOMPARE(scale, 1);
+    QVERIFY(NvOutputTopology::resolveMacClientDisplayMode({
+        {QRect(0,0,1710,1107), QSize(3024,1964), QSize(3024,1964)}}, &error, &scale).isEmpty());
+    QVERIFY(NvOutputTopology::resolveMacClientDisplayMode({
+        {QRect(0,0,2500,1500), QSize(5000,3000), QSize(5000,3000)},
+        {QRect(2500,0,2500,1500), QSize(5000,3000), QSize(5000,3000)}}, &error, &scale).isEmpty());
 }
 
 void TestOutputTopology::recognizesDescriptionCapabilities()
@@ -76,9 +148,27 @@ void TestOutputTopology::matchesMacClientCanvas()
     QCOMPARE(NvOutputTopology::resolveMacClientDisplayMode({
         {QRect(2560,0,2560,2160), QSize(2560,2160)},
         {QRect(0,0,2560,2160), QSize(2560,2160)}}), QString("5120x2160"));
-    QVERIFY(NvOutputTopology::resolveMacClientDisplayMode({
+    QCOMPARE(NvOutputTopology::resolveMacClientDisplayMode({
         {QRect(0,0,3840,2160), QSize(3840,2160)},
-        {QRect(3840,0,3840,2160), QSize(3840,2160)}}).isEmpty());
+        {QRect(3840,0,3840,2160), QSize(3840,2160)}}), QString("7680x2160"));
+    for (QSize native : {QSize(3024,1964), QSize(3456,2234), QSize(2880,1864), QSize(2160,3840)}) {
+        const QString mode = QStringLiteral("%1x%2").arg(native.width()).arg(native.height());
+        const QVector<NvClientDisplay> screens = {{QRect(QPoint(0,0), native / 2), native}};
+        QCOMPARE(NvOutputTopology::resolveMacClientDisplayMode(screens), mode);
+        QCOMPARE(NvOutputTopology::macDisplayModeSize(mode), native);
+        QVERIFY(!NvOutputTopology::virtualModeSize(mode).isValid());
+        QString layout;
+        QStringList modes;
+        QVERIFY(!NvOutputTopology::resolveClientDisplayLayout(screens, layout, modes));
+    }
+    for (const QString mode : {"0x2160", "3023x1964", "3024x1963", "8194x2160",
+            "3840x8194", "-2x2", "03024x1964", "3024X1964", "3024x1964x2", "2x+2",
+            "2x2 ", "9999999999999999999x2"}) {
+        QVERIFY(!NvOutputTopology::macDisplayModeSize(mode).isValid());
+    }
+    QVERIFY(NvOutputTopology::resolveMacClientDisplayMode({
+        {QRect(0,0,5120,2160), QSize(5120,2160)},
+        {QRect(5120,0,5120,2160), QSize(5120,2160)}}).isEmpty());
     QVERIFY(NvOutputTopology::resolveMacClientDisplayMode({
         {QRect(0,0,1920,1080), QSize(1920,1080)},
         {QRect(0,1080,1920,1080), QSize(1920,1080)}}).isEmpty());

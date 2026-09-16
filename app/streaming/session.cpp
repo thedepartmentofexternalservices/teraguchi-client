@@ -16,6 +16,9 @@
 #include "streaming/streamutils.h"
 #include "backend/computermanager.h"
 #include "backend/nvaddress.h"
+#ifdef Q_OS_DARWIN
+#include "streaming/macwindow.h"
+#endif
 
 #include <Limelight.h>
 #include <SDL3/SDL.h>
@@ -1673,19 +1676,9 @@ bool Session::initialize()
         return false;
     }
 #ifdef Q_OS_DARWIN
-    if (qEnvironmentVariableIntValue("I_WANT_BUGGY_FULLSCREEN") == 0) {
-        // Using modesetting on modern versions of macOS is extremely unreliable
-        // and leads to hangs, deadlocks, and other nasty stuff. The only time
-        // people seem to use it is to get the full screen on notched Macs,
-        // which setting SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES=1 also accomplishes
-        // with much less headache.
-        //
-        // https://github.com/moonlight-stream/moonlight-qt/issues/973
-        // https://github.com/moonlight-stream/moonlight-qt/issues/999
-        // https://github.com/moonlight-stream/moonlight-qt/issues/1211
-        // https://github.com/moonlight-stream/moonlight-qt/issues/1218
-        SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "1");
-    }
+    // Keep native fullscreen Spaces, including trackpad app switching. Match
+    // Client uses the notch-safe viewport; never switch the desktop mode.
+    SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "1");
 #endif
 
     if (!StreamingPreferences::isPlankProfileValidForCaptureSource(
@@ -2097,6 +2090,14 @@ bool Session::snapshotClientDisplays()
         m_UseMultiDisplayPresentation = m_AssignedDisplayCount == 2;
         return m_TargetDisplayId && MacDisplayBinding::current(m_AssignedDisplays);
     }
+#ifdef Q_OS_DARWIN
+    bool matchMacDesktop;
+    {
+        QReadLocker lock(&m_Computer->lock);
+        matchMacDesktop = m_PlankCaptureSource == StreamingPreferences::PLANK_CAPTURE_SCREENCAPTUREKIT &&
+            m_Computer->plankHostLayout == NvOutputTopology::MatchClientHostLayout;
+    }
+#endif
     const int targetIndex = getTargetDisplayIndex();
     if (targetIndex < 0) { emit displayLaunchError(tr("The selected client display is unavailable.")); return false; }
     m_TargetDisplayId = StreamUtils::getDisplayId(targetIndex);
@@ -2118,6 +2119,20 @@ bool Session::snapshotClientDisplays()
             return false;
         }
         snapshot.nativeSize = QSize(nativeMode.w, nativeMode.h);
+#ifdef Q_OS_DARWIN
+        if (matchMacDesktop) {
+            SDL_DisplayMode currentMode;
+            SDL_Rect matchedBounds;
+            if (!StreamUtils::getMacCurrentDisplayModeForBounds(snapshot.logicalBounds,
+                    &currentMode, &matchedBounds, m_IsFullScreen)) return false;
+            snapshot.macMatchedBounds = QRect(matchedBounds.x, matchedBounds.y,
+                                             matchedBounds.w, matchedBounds.h);
+            snapshot.macBackingSize = QSize(currentMode.w, currentMode.h);
+            // Presentation tiles must share the matched backing-pixel canvas,
+            // not mix differently scaled panel-native pixel dimensions.
+            snapshot.nativeSize = snapshot.macBackingSize;
+        }
+#endif
         m_ClientDisplays.append(snapshot);
     }
 
@@ -2434,6 +2449,7 @@ bool Session::configurePlankHostLayout()
     QString virtualMode1;
     QString virtualMode2;
     QSize authenticatedDesktopSize;
+    QSizeF authenticatedLogicalSize;
     bool hostRejectsRequestedLayout = false;
     {
         QReadLocker lock(&m_Computer->lock);
@@ -2443,6 +2459,7 @@ bool Session::configurePlankHostLayout()
         virtualMode2 = m_Computer->plankVirtualMode2;
         authenticatedDesktopSize = QSize(m_Computer->outputTopology.desktopWidth,
                                          m_Computer->outputTopology.desktopHeight);
+        authenticatedLogicalSize = m_Computer->outputTopology.captureLogicalBounds.size();
         const bool hostPolicyKnown = m_Computer->outputTopology.displayPolicyKnown();
         hostRejectsRequestedLayout = hostPolicyKnown &&
                 !m_Computer->outputTopology.allowsBookmarkHostLayout(layoutPolicy);
@@ -2468,18 +2485,20 @@ bool Session::configurePlankHostLayout()
     if (layoutPolicy == NvOutputTopology::MatchClientHostLayout) {
         QVector<NvClientDisplay> displays;
         for (const auto& display : std::as_const(m_ClientDisplays)) {
-            displays.append({QRect(display.logicalBounds.x,
+            displays.append({display.macMatchedBounds.isValid() ? display.macMatchedBounds : QRect(display.logicalBounds.x,
                                    display.logicalBounds.y,
                                    display.logicalBounds.w,
                                    display.logicalBounds.h),
-                             display.nativeSize});
+                             display.nativeSize, display.macBackingSize});
         }
 
         QString error;
         if (m_PlankCaptureSource == StreamingPreferences::PLANK_CAPTURE_SCREENCAPTUREKIT) {
-            const QString mode = NvOutputTopology::resolveMacClientDisplayMode(displays, &error);
-            if (mode.isEmpty() || NvOutputTopology::virtualModeSize(mode) !=
-                    authenticatedDesktopSize) {
+            int scale = 1;
+            const QString mode = NvOutputTopology::resolveMacClientDisplayMode(displays, &error, &scale);
+            if (mode.isEmpty() || NvOutputTopology::macDisplayModeSize(mode) !=
+                    authenticatedDesktopSize || authenticatedLogicalSize !=
+                    QSizeF(authenticatedDesktopSize.width() / scale, authenticatedDesktopSize.height() / scale)) {
                 emit displayLaunchError(mode.isEmpty() ? error : tr("Client displays changed during connection. Please reconnect to match the current display resolution."));
                 return false;
             }
@@ -2672,6 +2691,10 @@ void Session::updateOptimalWindowDisplayMode()
         SDL_SetWindowFullscreenMode(m_Window, nullptr);
         return;
     }
+    bool preserveDesktopMode = strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0;
+#ifdef Q_OS_DARWIN
+    preserveDesktopMode = true;
+#endif
     // A PLANK Wayland session is a desktop surface, not a monitor
     // mode switch. Let the compositor size the fullscreen surface and keep
     // SDL's window and pointer coordinates in the same space. SDL 3.4.2 can
@@ -2679,15 +2702,18 @@ void Session::updateOptimalWindowDisplayMode()
     // exposing the fullscreen mode dimensions through SDL_GetWindowSize().
     // Our renderer already performs the required aspect scaling and
     // letterboxing, so an exclusive Wayland display mode adds no value.
-    if (strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0) {
+    // Mac fullscreen also preserves the current desktop mode; exclusive-mode
+    // selection must not change the user's Retina scale, including manual
+    // remote resolutions and connections to Linux hosts.
+    if (preserveDesktopMode) {
         if (!SDL_SetWindowFullscreenMode(m_Window, nullptr)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "Failed to select Wayland desktop fullscreen mode: %s",
+                        "Failed to select desktop fullscreen mode: %s",
                         SDL_GetError());
         }
         else {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Using compositor-native Wayland fullscreen mode");
+                        "Using compositor-native desktop fullscreen mode");
         }
         return;
     }
@@ -2907,6 +2933,7 @@ bool Session::startConnectionAsync(bool reconnecting,
         if (m_AssignmentWatch) http->setHostTrust(m_Computer->assignedHostTrust, [this] {
             return !m_DisconnectRequested.load() && m_AssignmentWatch->permitsConnection();
         });
+        if (reconnecting) http->setRequestGate([this](bool auth) { return waitForPlankReconnectRequest(auth); });
         const QString captureSource =
                 m_PlankCaptureSource == StreamingPreferences::PLANK_CAPTURE_SCREENCAPTUREKIT ?
                     QStringLiteral("screencapturekit") :
@@ -2960,6 +2987,14 @@ bool Session::startConnectionAsync(bool reconnecting,
                         topology.desktopWidth != m_StreamConfig.width ||
                         topology.desktopHeight != m_StreamConfig.height) {
                     throw GfeHttpResponseException(409, "The Mac display changed. Reconnect to refresh its capture geometry.");
+                }
+                // Launch is one-shot, including an ambiguous network timeout.
+                // Readiness failures above keep the setup context instead.
+                {
+                    QWriteLocker lock(&m_Computer->lock);
+                    m_Computer->sessionToken.fill(QChar('\0'));
+                    m_Computer->sessionToken.clear();
+                    m_Computer->authorizationState = NvComputer::AS_UNAUTHORIZED;
                 }
                 macLaunch = http->startMacPreview(topology, pin, m_StreamConfig.bitrate, quicUdpPayloadMtu);
                 plankTransportPort = http->controlPort();
@@ -3055,6 +3090,10 @@ bool Session::startConnectionAsync(bool reconnecting,
                             }
                             validateAssignedEndpoint();
                             http = std::make_unique<NvHTTP>(m_Computer);
+                            if (m_AssignmentWatch) http->setHostTrust(m_Computer->assignedHostTrust, [this] {
+                                return !m_DisconnectRequested.load() && m_AssignmentWatch->permitsConnection();
+                            });
+                            if (reconnecting) http->setRequestGate([this](bool auth) { return waitForPlankReconnectRequest(auth); });
                             const QString token = http->authenticate(
                                         m_PlankUsername,
                                         m_PlankPassword);
@@ -3065,7 +3104,12 @@ bool Session::startConnectionAsync(bool reconnecting,
                             }
                             authenticationRefreshRequired = false;
                             qInfo() << "PLANK authenticated to the replacement display worker";
+                        } catch (const GfeHttpResponseException& retryError) {
+                            if (reconnecting && PlankReconnectPolicy::terminalStatus(retryError.getStatusCode(), true))
+                                m_ReconnectCancelled.store(true);
+                            throw;
                         } catch (const QtNetworkReplyException& retryError) {
+                            if (retryError.getError() == QNetworkReply::SslHandshakeFailedError) throw;
                             qInfo() << "PLANK replacement display worker is not ready for authentication:"
                                     << retryError.toQString();
                             continue;
@@ -3116,6 +3160,7 @@ bool Session::startConnectionAsync(bool reconnecting,
                         qInfo() << "PLANK display transition wait attempt failed:"
                                 << retryError.toQString();
                     } catch (const QtNetworkReplyException& retryError) {
+                        if (retryError.getError() == QNetworkReply::SslHandshakeFailedError) throw;
                         qInfo() << "PLANK display transition worker is not ready:"
                                 << retryError.toQString();
                     }
@@ -3249,10 +3294,18 @@ bool Session::startConnectionAsync(bool reconnecting,
             qInfo() << "PLANK authentication token consumed after launch";
         }
     } catch (const GfeHttpResponseException& e) {
-        if (reconnecting && e.getStatusCode() == 403) {
+        if (reconnecting && PlankReconnectPolicy::terminalStatus(e.getStatusCode(), false)) {
             // Operator consent cannot recover through automatic reauthentication.
             m_ReconnectCancelled.store(true);
             emit displayLaunchError(e.toQString());
+        }
+        m_WaitingForSessionCleanup.store(false);
+        emit sessionCleanupWaitChanged(false, QString());
+        if (reconnecting && e.getStatusCode() == 401) {
+            QWriteLocker lock(&m_Computer->lock);
+            m_Computer->sessionToken.fill(QChar('\0'));
+            m_Computer->sessionToken.clear();
+            m_Computer->authorizationState = NvComputer::AS_UNAUTHORIZED;
         }
         if (!reconnecting) {
             emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
@@ -3261,6 +3314,12 @@ bool Session::startConnectionAsync(bool reconnecting,
         }
         return false;
     } catch (const QtNetworkReplyException& e) {
+        if (reconnecting && e.getError() == QNetworkReply::SslHandshakeFailedError) {
+            m_ReconnectCancelled.store(true);
+            emit displayLaunchError(e.toQString());
+        }
+        m_WaitingForSessionCleanup.store(false);
+        emit sessionCleanupWaitChanged(false, QString());
         if (!reconnecting) {
             emit displayLaunchError(e.toQString());
         } else {
@@ -3434,6 +3493,22 @@ bool Session::beginPlankReconnect(
     return true;
 }
 
+bool Session::waitForPlankReconnectRequest(bool restartAuthenticationAfterWait)
+{
+    bool waited = false;
+    while (!m_ReconnectCancelled.load() && !m_ConnectionStartCancelled.load()) {
+        if (m_ReconnectPolicy.allowsRequest(SDL_GetTicks())) {
+            // A password conversation may have expired while Ask was open.
+            // Restart it after explicit consent, rather than submitting a stale
+            // challenge response and treating its rejection as a bad password.
+            return !(waited && restartAuthenticationAfterWait);
+        }
+        waited = true;
+        SDL_Delay(50);
+    }
+    return false;
+}
+
 bool Session::runPlankReconnect()
 {
     if (m_PlankUsername.isEmpty() ||
@@ -3441,42 +3516,54 @@ bool Session::runPlankReconnect()
         return false;
     }
 
-    for (int attempt = 1; !m_ReconnectCancelled.load(); ++attempt) {
+    {
+        QWriteLocker lock(&m_Computer->lock);
+        m_Computer->sessionToken.fill(QChar('\0'));
+        m_Computer->sessionToken.clear();
+        m_Computer->authorizationState = NvComputer::AS_UNAUTHORIZED;
+        m_Computer->currentGameId = 0;
+    }
+    for (int attempt = 1; waitForPlankReconnectRequest(); ++attempt) {
         if (m_DisconnectRequested.load()) return false;
         if (m_AssignmentWatch && !m_AssignmentWatch->permitsConnection()) {
             SDL_Delay(50);
             continue;
         }
+        bool authenticating = false;
         try {
+            QString token;
             {
-                QWriteLocker lock(&m_Computer->lock);
-                m_Computer->sessionToken.fill(QChar('\0'));
-                m_Computer->sessionToken.clear();
-                m_Computer->authorizationState = NvComputer::AS_UNAUTHORIZED;
-                // A replacement media worker has no in-memory app state.
-                // Prefer a fresh launch; startConnectionAsync() falls back to
-                // resume when this is merely a transient same-worker outage.
-                m_Computer->currentGameId = 0;
+                QReadLocker lock(&m_Computer->lock);
+                token = m_Computer->sessionToken;
             }
             NvHTTP http(m_Computer);
             if (m_AssignmentWatch) http.setHostTrust(m_Computer->assignedHostTrust, [this] {
                 return !m_DisconnectRequested.load() && m_AssignmentWatch->permitsConnection();
             });
             validateAssignedEndpoint();
-            bool greeterConfirmed = false;
-            const QString token = http.authenticate(
-                        m_PlankUsername,
-                        m_PlankPassword, &greeterConfirmed);
-            if (greeterConfirmed &&
-                    ((m_Computer->plankFeatureFlags & NvOutputTopology::AuthenticatedDesktopStageFeature) ||
-                     m_Computer->plankFeatureFlags == NvOutputTopology::FixedCaptureFlags)) {
-                m_ReconnectGreeterConfirmed.store(true);
+            http.setRequestGate([this](bool auth) { return waitForPlankReconnectRequest(auth); });
+            if (token.isEmpty()) {
+                authenticating = true;
+                bool greeterConfirmed = false;
+                token = http.authenticate(m_PlankUsername, m_PlankPassword, &greeterConfirmed);
+                authenticating = false;
+                {
+                    QWriteLocker lock(&m_Computer->lock);
+                    m_Computer->sessionToken = token;
+                    m_Computer->authorizationState = NvComputer::AS_AUTHORIZED;
+                }
+                if (greeterConfirmed &&
+                        ((m_Computer->plankFeatureFlags & NvOutputTopology::AuthenticatedDesktopStageFeature) ||
+                         m_Computer->plankFeatureFlags == NvOutputTopology::FixedCaptureFlags)) {
+                    m_ReconnectGreeterConfirmed.store(true);
+                }
             }
 
             NvOutputTopology topology;
             bool topologySupported;
             bool macDesktop;
             QString desktopMode;
+            int desktopScale = 1;
             {
                 QReadLocker lock(&m_Computer->lock);
                 topologySupported = NvOutputTopology::supportsDescription(
@@ -3486,16 +3573,16 @@ bool Session::runPlankReconnect()
                 if (macDesktop && m_Computer->plankHostLayout == NvOutputTopology::MatchClientHostLayout) {
                     QVector<NvClientDisplay> displays;
                     for (const auto& display : std::as_const(m_ClientDisplays)) {
-                        displays.append({QRect(display.logicalBounds.x, display.logicalBounds.y,
-                                               display.logicalBounds.w, display.logicalBounds.h), display.nativeSize});
+                        displays.append({display.macMatchedBounds.isValid() ? display.macMatchedBounds : QRect(display.logicalBounds.x, display.logicalBounds.y,
+                                               display.logicalBounds.w, display.logicalBounds.h), display.nativeSize, display.macBackingSize});
                     }
-                    desktopMode = NvOutputTopology::resolveMacClientDisplayMode(displays);
+                    desktopMode = NvOutputTopology::resolveMacClientDisplayMode(displays, nullptr, &desktopScale);
                     if (desktopMode.isEmpty()) return false;
                 }
             }
             if (topologySupported) {
                 topology = macDesktop ? http.prepareMacDisplay(desktopMode,
-                    StreamingPreferences::plankAppleEncodingMode(m_PlankVideoProfile)) : http.getOutputTopology();
+                    StreamingPreferences::plankAppleEncodingMode(m_PlankVideoProfile), desktopScale) : http.getOutputTopology();
             }
             const QVector<NvApp> apps = http.getAppList();
             {
@@ -3508,36 +3595,43 @@ bool Session::runPlankReconnect()
                 m_Computer->updateAppList(apps);
             }
 
-            if (startConnectionAsync(true) &&
-                    !m_ReconnectCancelled.load()) {
+            if (waitForPlankReconnectRequest() && startConnectionAsync(true) &&
+                    !m_ReconnectCancelled.load() && m_ReconnectPolicy.allowsRequest(SDL_GetTicks())) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "PLANK reconnect transport completed on attempt %d",
                             attempt);
                 return true;
             }
         } catch (const GfeHttpResponseException& error) {
-            qWarning() << "PLANK reauthentication attempt" << attempt
+            qWarning() << "PLANK reconnect attempt" << attempt
                        << "failed:" << error.toQString();
-            if (error.getStatusCode() == 403) {
+            if (PlankReconnectPolicy::terminalStatus(error.getStatusCode(), authenticating)) {
                 m_ReconnectCancelled.store(true);
                 emit displayLaunchError(error.toQString());
             }
+            if (error.getStatusCode() == 401) {
+                QWriteLocker lock(&m_Computer->lock);
+                m_Computer->sessionToken.fill(QChar('\0'));
+                m_Computer->sessionToken.clear();
+                m_Computer->authorizationState = NvComputer::AS_UNAUTHORIZED;
+            }
         } catch (const QtNetworkReplyException& error) {
+            if (error.getError() == QNetworkReply::SslHandshakeFailedError) {
+                m_ReconnectCancelled.store(true);
+                emit displayLaunchError(error.toQString());
+            }
             qWarning() << "PLANK reconnect attempt" << attempt
-                       << "could not reach the host:" << error.toQString();
+                       << "was deferred or failed:" << error.toQString();
         }
 
 #ifdef PLANK_TRANSPORT
+        // If setup finished after the Ask deadline, discard that transport
+        // before pausing. Do not keep a hidden connection alive (or accept a
+        // dead one) while the operator is away from the unanswered prompt.
         stopPlankTransportMediaReceivers();
 #endif
         LiStopConnection();
         stopPlankTransportDataPlane();
-        {
-            QWriteLocker lock(&m_Computer->lock);
-            m_Computer->sessionToken.fill(QChar('\0'));
-            m_Computer->sessionToken.clear();
-            m_Computer->authorizationState = NvComputer::AS_UNAUTHORIZED;
-        }
         if (!m_ReconnectCancelled.load()) {
             constexpr int RetryDelayMs = 1000;
             constexpr int CancellationPollMs = 50;
@@ -4310,6 +4404,8 @@ void Session::execInternal()
                 m_PlankToolbar->hideReconnectPrompt();
                 reconnectDecisionDeadline = SDL_GetTicks() +
                         static_cast<Uint64>(m_Preferences->plankUnreachableTimeoutSeconds) * 1000;
+                m_ReconnectPolicy.allowUntil(reconnectDecisionDeadline);
+                setPlankReconnectStatus("Waiting for workstation...", false);
             }
             if (action == PlankToolbar::Action::ToggleFullscreen) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -4548,10 +4644,11 @@ void Session::execInternal()
                                 tr("The workstation desktop changed, but the client could not start reconnecting."));
                     goto DispatchDeferredCleanup;
                 }
-                reconnectThread = new PlankReconnectThread(this);
-                reconnectThread->start();
                 reconnectDecisionDeadline = SDL_GetTicks() +
                         static_cast<Uint64>(m_Preferences->plankUnreachableTimeoutSeconds) * 1000;
+                m_ReconnectPolicy.allowUntil(reconnectDecisionDeadline);
+                reconnectThread = new PlankReconnectThread(this);
+                reconnectThread->start();
                 break;
             case SDL_CODE_PLANK_REPLANK_COMPLETE:
             {
@@ -4596,6 +4693,19 @@ void Session::execInternal()
             }
             break;
 
+#ifdef Q_OS_DARWIN
+        case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+        case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+            if (SDL_Window* window = windowForEvent(event.window.windowID)) {
+                MacWindow::logGeometry(window);
+                m_InputHandler->updateKeyboardGrabState();
+                if (m_PlankToolbar) {
+                    m_PlankToolbar->notifyWindowChanged();
+                }
+            }
+            break;
+#endif
+
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
         case SDL_EVENT_WINDOW_SHOWN:
         case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
@@ -4608,6 +4718,11 @@ void Session::execInternal()
             if (eventWindow == nullptr) {
                 break;
             }
+#ifdef Q_OS_DARWIN
+            if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+                MacWindow::logGeometry(eventWindow);
+            }
+#endif
             if (m_PlankToolbar && eventWindow == m_Window &&
                     event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
                 m_PlankToolbar->notifyWindowChanged();
@@ -5037,6 +5152,12 @@ DispatchDeferredCleanup:
     delete m_InputHandler;
     m_InputHandler = nullptr;
     clearPlankReconnectCredentials();
+    {
+        QWriteLocker lock(&m_Computer->lock);
+        m_Computer->sessionToken.fill(QChar('\0'));
+        m_Computer->sessionToken.clear();
+        m_Computer->authorizationState = NvComputer::AS_UNAUTHORIZED;
+    }
 
 #ifdef PLANK_TRANSPORT
     // Native media threads call directly into the active decoder and audio

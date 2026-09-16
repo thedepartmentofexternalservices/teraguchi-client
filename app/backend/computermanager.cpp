@@ -10,6 +10,10 @@
 #include <QCoreApplication>
 #include <QGuiApplication>
 #include <QScreen>
+#ifdef Q_OS_DARWIN
+#include "streaming/streamutils.h"
+#include <ApplicationServices/ApplicationServices.h>
+#endif
 
 #include <utility>
 #include <limits>
@@ -675,7 +679,7 @@ class PendingAuthenticationTask : public QObject, public QRunnable
 
 public:
     PendingAuthenticationTask(ComputerManager* computerManager, NvComputer* computer,
-                              QString username, QString password, QString matchedDesktopMode,
+                              QString username, QString password, QString matchedDesktopMode, int matchedDesktopScale,
                               NvAddress expectedAddress, QString expectedServerUuid, QString requestId,
                               std::shared_ptr<AssignedAuthentication> assigned, TeraguchiStudio::HostLease hostTrust)
         : m_ComputerManager(computerManager),
@@ -683,6 +687,7 @@ public:
           m_Username(std::move(username)),
           m_Password(std::move(password)),
           m_MatchedDesktopMode(std::move(matchedDesktopMode)),
+          m_MatchedDesktopScale(matchedDesktopScale),
           m_ExpectedAddress(std::move(expectedAddress)),
           m_ExpectedServerUuid(std::move(expectedServerUuid)),
           m_Assigned(std::move(assigned)), m_HostTrust(std::move(hostTrust))
@@ -755,7 +760,7 @@ private:
                 appleEncodingMode = StreamingPreferences::plankAppleEncodingMode(m_Computer->plankVideoProfile);
             }
             if (topologySupported) {
-                topology = macDesktop ? http.prepareMacDisplay(desktopMode, appleEncodingMode) : http.getOutputTopology();
+                topology = macDesktop ? http.prepareMacDisplay(desktopMode, appleEncodingMode, m_MatchedDesktopScale) : http.getOutputTopology();
             }
             const QVector<NvApp> apps = http.getAppList();
             if (!m_ExpectedAddress.isNull()) {
@@ -815,6 +820,7 @@ private:
     QString m_Username;
     QString m_Password;
     QString m_MatchedDesktopMode;
+    int m_MatchedDesktopScale;
     NvAddress m_ExpectedAddress;
     QString m_ExpectedServerUuid;
     std::shared_ptr<AssignedAuthentication> m_Assigned;
@@ -826,6 +832,7 @@ void ComputerManager::authenticateHost(NvComputer* computer, QString username,
                                        QString expectedServerUuid, QString requestId, TeraguchiStudio::HostLease hostTrust)
 {
     QString matchedMode;
+    int matchedScale = 1;
     bool matchMac;
     {
         QReadLocker lock(&computer->lock);
@@ -833,17 +840,36 @@ void ComputerManager::authenticateHost(NvComputer* computer, QString username,
                 computer->plankHostLayout == NvOutputTopology::MatchClientHostLayout;
     }
     if (matchMac) {
-        // Read Qt screens on the GUI thread before starting authentication;
-        // devicePixelRatio removes compositor scaling from the requested pixels.
+        // Snapshot on the GUI thread before authentication. On macOS use the
+        // current backing pixels AND logical size used by Session. Panel-native
+        // pixels alone lose the user's Retina "Looks like" setting.
         Q_ASSERT(QThread::currentThread() == qApp->thread());
         QVector<NvClientDisplay> displays;
+#ifdef Q_OS_DARWIN
+        CGDirectDisplayID ids[16];
+        uint32_t count = 0;
+        if (CGGetActiveDisplayList(16, ids, &count) == kCGErrorSuccess) {
+            for (uint32_t index = 0; index < count; ++index) {
+                SDL_DisplayMode mode;
+                SDL_Rect safeArea;
+                if (!StreamUtils::getMacCurrentDisplayMode(ids[index], &mode, &safeArea,
+                        m_Prefs->windowMode != StreamingPreferences::WM_WINDOWED)) {
+                    displays.clear();
+                    break;
+                }
+                displays.append({QRect(safeArea.x, safeArea.y, safeArea.w, safeArea.h),
+                    QSize(mode.w, mode.h), QSize(mode.w, mode.h)});
+            }
+        }
+#else
         for (QScreen* screen : QGuiApplication::screens()) {
             const QRect geometry = screen->geometry();
             const qreal ratio = screen->devicePixelRatio();
             displays.append({geometry, QSize(qRound(geometry.width() * ratio), qRound(geometry.height() * ratio))});
         }
+#endif
         QString error;
-        matchedMode = NvOutputTopology::resolveMacClientDisplayMode(displays, &error);
+        matchedMode = NvOutputTopology::resolveMacClientDisplayMode(displays, &error, &matchedScale);
         if (matchedMode.isEmpty()) {
             password.fill(QChar('\0'));
             // Preserve the asynchronous completion contract even for local
@@ -865,7 +891,7 @@ void ComputerManager::authenticateHost(NvComputer* computer, QString username,
         m_AssignedAuthentications.insert(requestId, assigned);
     }
     PendingAuthenticationTask* authentication = new PendingAuthenticationTask(
-        this, computer, std::move(username), std::move(password), matchedMode,
+        this, computer, std::move(username), std::move(password), matchedMode, matchedScale,
         std::move(expectedAddress), std::move(expectedServerUuid), std::move(requestId), std::move(assigned), std::move(hostTrust));
     QThreadPool::globalInstance()->start(authentication);
 }

@@ -12,6 +12,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QJsonObject>
+#include <functional>
 
 class NvComputer;
 
@@ -149,11 +150,15 @@ public:
     void setPlankSessionToken(QString sessionToken);
     void setHostTrust(TeraguchiStudio::HostLease trust, std::function<bool()> permitted = {});
 
+    // Used only by the session recovery worker; ordinary discovery/login has
+    // no gate. False cancels, while the callback may wait for a local decision.
+    void setRequestGate(std::function<bool(bool)> gate) { m_RequestGate = std::move(gate); }
+
     QString authenticate(QString username, QString password, bool* greeterConfirmed = nullptr);
     bool probeWorkerReplacement(const QString& instance, const QString& certificateSha256);
     QString workerInstance() const { return m_WorkerInstance; }
     NvOutputTopology getOutputTopology(QString* certificateSha256 = nullptr);
-    NvOutputTopology prepareMacDisplay(const QString& mode, const QString& encodingMode);
+    NvOutputTopology prepareMacDisplay(const QString& mode, const QString& encodingMode, int scale = 1);
     MacPreviewLaunch::Reply startMacPreview(const NvOutputTopology& topology,
                                            const QString& certificateSha256,
                                            int bitrateKbps, int udpPayloadSize);
@@ -204,6 +209,7 @@ public:
 
     QUrl m_BaseUrlHttps;
 private:
+    void waitForRequestPermission(bool authenticating = false);
     void
     handleSslErrors(QNetworkReply* reply, const QList<QSslError>& errors);
 
@@ -227,4 +233,5 @@ private:
     QNetworkAccessManager* m_Nam;
     QString m_SessionToken;
     QString m_WorkerInstance;
+    std::function<bool(bool)> m_RequestGate;
 };

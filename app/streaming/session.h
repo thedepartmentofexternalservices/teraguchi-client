@@ -22,6 +22,7 @@
 #include "audio/renderers/renderer.h"
 #include "video/overlaymanager.h"
 #include "videopacketlosswindow.h"
+#include "plankreconnectpolicy.h"
 
 class ComputerManager;
 class AssignmentWatch;
@@ -238,6 +239,7 @@ private:
     void setPlankReconnectStatus(const char* text, bool warning);
 
     bool runPlankReconnect();
+    bool waitForPlankReconnectRequest(bool restartAuthenticationAfterWait = false);
 
     bool finishPlankReconnect(bool success,
                                        const PlankReconnectState& state);
@@ -442,6 +444,7 @@ private:
     QString m_PlankHostCertificateSha256;
     std::atomic_bool m_Reconnecting;
     std::atomic_bool m_ReconnectCancelled;
+    PlankReconnectPolicy m_ReconnectPolicy;
     std::atomic_bool m_CanReconnect;
     std::atomic_bool m_ConnectionStartCancelled;
     std::atomic_bool m_WaitingForSessionCleanup;
@@ -458,6 +461,8 @@ private:
         SDL_DisplayID displayId = 0;
         SDL_Rect logicalBounds = {};
         QSize nativeSize;
+        QSize macBackingSize;
+        QRect macMatchedBounds;
         QRect canvasRect;
     };
     QVector<ClientDisplaySnapshot> m_ClientDisplays;
