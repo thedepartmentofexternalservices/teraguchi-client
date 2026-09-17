@@ -19,6 +19,7 @@ class LinuxRawWacomInput;
 #endif
 #include "streaming/planktabletcursor.h"
 #ifdef Q_OS_MACOS
+class MacQuitShortcut;
 class MacPenInput;
 class MacKeyboardState;
 class MacSystemKeys;
@@ -114,6 +115,7 @@ private:
     std::unique_ptr<MacKeyboardState> m_MacKeyboard;
     std::unique_ptr<MacSystemKeys> m_MacSystemKeys;
     bool m_PenToolbarActive = false;
+    std::unique_ptr<MacQuitShortcut> m_MacQuitShortcut;
 #endif
     enum KeyCombo {
         KeyComboQuit,

@@ -222,6 +222,9 @@ signals:
     void readyForDeletion();
 
 private:
+#ifdef Q_OS_MACOS
+    std::atomic_bool m_ApplicationExitRequested{false};
+#endif
     void execInternal();
     void validateAssignedEndpoint();
 

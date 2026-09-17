@@ -19,6 +19,9 @@
 #endif
 #include "backend/computermanager.h"
 #include "backend/nvaddress.h"
+#ifdef Q_OS_MACOS
+#include "macapplication.h"
+#endif
 #ifdef Q_OS_DARWIN
 #include "streaming/macwindow.h"
 #endif
@@ -2055,6 +2058,9 @@ private:
 
     void run() override
     {
+#ifdef Q_OS_MACOS
+        if (!m_Session->m_ApplicationExitRequested.load())
+#endif
         emit m_Session->sessionFinished();
 
         // The video decoder must already be destroyed, since it could
@@ -3610,7 +3616,11 @@ bool Session::beginPlankReconnect(
     stopPlankTransportDataPlane();
     m_InputHandler->resetRemoteCursorPositionEpoch();
     m_ReconnectCancelled.store(false);
-    m_ConnectionStartCancelled.store(m_DisconnectRequested.load());
+    m_ConnectionStartCancelled.store(m_DisconnectRequested.load()
+#ifdef Q_OS_MACOS
+                                    || m_ApplicationExitRequested.load()
+#endif
+                                    );
     return true;
 }
 
@@ -3796,7 +3806,11 @@ bool Session::finishPlankReconnect(
     setPlankReconnectStatus("", false);
     m_ReconnectRequested = false;
     m_ReconnectCancelled.store(false);
-    m_ConnectionStartCancelled.store(m_DisconnectRequested.load());
+    m_ConnectionStartCancelled.store(m_DisconnectRequested.load()
+#ifdef Q_OS_MACOS
+                                    || m_ApplicationExitRequested.load()
+#endif
+                                    );
     m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
 
     m_OverlayManager.setOverlayColor(Overlay::OverlayStatusUpdate, {0xCC, 0x00, 0x00, 0xFF});
@@ -3944,6 +3958,28 @@ public:
 
 void Session::exec(QWindow* qtWindow)
 {
+#ifdef Q_OS_MACOS
+    auto* application = static_cast<MacApplication*>(QCoreApplication::instance());
+    if (!application->beginSession()) {
+        emit readyForDeletion();
+        return;
+    }
+    const auto exitConnection = connect(application, &MacApplication::exitRequested,
+                                       this, [this] {
+        m_ApplicationExitRequested.store(true);
+        cancelConnectionStart();
+        m_ReconnectCancelled.store(true);
+        m_CanReconnect.store(false);
+    });
+    // sessionFinished precedes asynchronous transport cleanup. Only this
+    // later signal releases application ownership. Queue onto Qt's thread;
+    // the Session itself may already have been garbage-collected by QML.
+    connect(this, &Session::readyForDeletion, application,
+            [application, exitConnection] {
+        QObject::disconnect(exitConnection);
+        application->endSession();
+    }, Qt::QueuedConnection);
+#endif
     m_QtWindow = qtWindow;
     if (m_AssignmentWatch) m_AssignmentWatch->start();
 
@@ -4001,7 +4037,18 @@ void Session::execInternal()
     //
     // NB: This initializes the SDL video subsystem, so it must be
     // called on the main thread.
-    if (m_DisconnectRequested.load() || !initialize()) {
+    const bool initialized = !m_DisconnectRequested.load() && initialize();
+    if (!initialized
+#ifdef Q_OS_MACOS
+            || m_ApplicationExitRequested.load()
+#endif
+            ) {
+#ifdef Q_OS_MACOS
+        if (initialized) {
+            SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        }
+        if (!m_ApplicationExitRequested.load())
+#endif
         emit sessionFinished();
         emit readyForDeletion();
         return;
@@ -4021,7 +4068,11 @@ void Session::execInternal()
                                          m_StreamConfig.width,
                                          m_StreamConfig.height);
 
-    m_ConnectionStartCancelled.store(m_DisconnectRequested.load());
+    m_ConnectionStartCancelled.store(m_DisconnectRequested.load()
+#ifdef Q_OS_MACOS
+                                    || m_ApplicationExitRequested.load()
+#endif
+                                    );
     AsyncConnectionStartThread asyncConnThread(this);
     if (!m_ThreadedExec) {
         // Kick off the async connection thread while we sit here and pump the event loop
@@ -4460,6 +4511,9 @@ void Session::execInternal()
     Uint64 nextPermissionCheck = 0;
     for (;;) {
 #ifdef Q_OS_MACOS
+#ifdef Q_OS_MACOS
+        if (m_ApplicationExitRequested.load()) goto DispatchDeferredCleanup;
+#endif
         if (m_PenDisconnectRequested) goto DispatchDeferredCleanup;
         if (m_KeyboardInputRejected) {
             emit displayLaunchError(m_KeyboardPermissionFailure ?
@@ -4592,13 +4646,17 @@ void Session::execInternal()
                         m_Preferences->plankUnreachableTimeoutSeconds);
             reconnectDecisionDeadline = 0;
         }
-        const int eventWaitTimeout =
+        int eventWaitTimeout =
 #ifdef Q_OS_MACOS
                 m_InputHandler->hasPendingPenInput() ? 0 :
 #endif
                 m_Reconnecting.load() ? 50 :
                     (m_PlankToolbar ?
                          m_PlankToolbar->eventWaitTimeout() : 1000);
+#ifdef Q_OS_MACOS
+        // Poll explicit application-exit state even when no SDL events arrive.
+        eventWaitTimeout = std::min(eventWaitTimeout, 50);
+#endif
         const bool hasEvent = SDL_WaitEventTimeout(&event, eventWaitTimeout);
 #ifdef Q_OS_MACOS
         const bool hideSystemUi = usesMacOutputPair() && m_Window && m_SecondaryWindows.size() == 1 &&
@@ -4626,6 +4684,9 @@ void Session::execInternal()
             }
         }
 
+#ifdef Q_OS_MACOS
+        if (m_ApplicationExitRequested.load()) goto DispatchDeferredCleanup;
+#endif
         if (!assignedWindowsCurrent()) {
             requestDisconnect();
             emit displayLaunchError(tr("A presentation window left its selected display. The session has stopped."));
