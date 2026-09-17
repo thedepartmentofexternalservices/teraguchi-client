@@ -16,6 +16,17 @@
 #include <QRunnable>
 #include <QTimer>
 #include <QWaitCondition>
+#include <memory>
+
+// Request-scoped result. Assigned login never publishes credentials or tokens
+// into a shared bookmark; cancellation and completion serialize on this lock.
+struct AssignedAuthentication {
+    QMutex lock;
+    bool cancelled = false;
+    std::unique_ptr<NvComputer> computer;
+    QString username, password;
+    ~AssignedAuthentication() { password.fill(QChar(0)); }
+};
 
 class ComputerManager;
 
@@ -244,7 +255,12 @@ public:
 
     void addNewHost(NvAddress address, bool mdns, QString name = QString(), NvAddress mdnsIpv6Address = NvAddress());
 
-    void authenticateHost(NvComputer* computer, QString username, QString password);
+    void authenticateHost(NvComputer* computer, QString username, QString password,
+                          NvAddress expectedAddress = NvAddress(), QString expectedServerUuid = QString(),
+                          QString requestId = QString(), TeraguchiStudio::HostLease hostTrust = {});
+
+    void cancelAssignedAuthentication(const QString& requestId);
+    std::unique_ptr<NvComputer> takeAssignedAuthentication(const QString& requestId, QString& username, QString& password);
 
     bool takePlankReconnectCredentials(NvComputer* computer,
                                                 QString& username,
@@ -264,6 +280,7 @@ signals:
     void computerStateChanged(NvComputer* computer);
 
     void authenticationCompleted(NvComputer* computer, QString error);
+    void assignedAuthenticationCompleted(QString requestId, QString computerId, QVariant error);
 
     void computerAddCompleted(QVariant success);
 
@@ -295,6 +312,7 @@ private:
     QMap<QString, NvComputer*> m_KnownHosts;
     QMutex m_ReconnectCredentialLock;
     QMap<NvComputer*, QPair<QString, QString>> m_ReconnectCredentials;
+    QHash<QString, std::shared_ptr<AssignedAuthentication>> m_AssignedAuthentications; // GUI thread only
     QMap<QString, ComputerPollingEntry*> m_PollEntries;
     QHash<QString, NvComputer> m_LastSerializedHosts; // Protected by m_DelayedFlushMutex
     QSharedPointer<QMdnsEngine::Server> m_MdnsServer;

@@ -7,30 +7,12 @@
 #include <SDL3/SDL.h>
 
 #include "../plankpresentation.h"
+#include "decoderpolicy.h"
 
 #define SDL_CODE_FRAME_READY 0
+#define SDL_CODE_VIDEO_CONTRACT_REJECTED 1
 
 #define MAX_SLICES 4
-
-enum class DecoderSelectionMode
-{
-    PreferExactHardwareThenSoftware,
-    ExactHardwareOnly,
-};
-
-enum class DecoderCaptureSource
-{
-    Nvfbc8Bit,
-    NativeX11_10Bit,
-    ScreenCaptureKit,
-};
-
-enum class DecoderEncoderBackend
-{
-    SoftwareCuda,
-    NvencDirect,
-    VideoToolbox,
-};
 
 typedef struct _VIDEO_STATS {
     uint64_t receivedVideoBytes;

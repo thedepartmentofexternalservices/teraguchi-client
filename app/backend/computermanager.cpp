@@ -662,6 +662,8 @@ void ComputerManager::clientSideAttributeUpdated(NvComputer* computer)
 
 void ComputerManager::handleAboutToQuit()
 {
+    const auto requests = m_AssignedAuthentications.keys();
+    for (const auto& request : requests) cancelAssignedAuthentication(request);
     QReadLocker lock(&m_Lock);
 
     // Interrupt polling threads immediately, so they
@@ -677,16 +679,30 @@ class PendingAuthenticationTask : public QObject, public QRunnable
 
 public:
     PendingAuthenticationTask(ComputerManager* computerManager, NvComputer* computer,
-                              QString username, QString password, QString matchedDesktopMode, int matchedDesktopScale)
+                              QString username, QString password, QString matchedDesktopMode, int matchedDesktopScale,
+                              NvAddress expectedAddress, QString expectedServerUuid, QString requestId,
+                              std::shared_ptr<AssignedAuthentication> assigned, TeraguchiStudio::HostLease hostTrust)
         : m_ComputerManager(computerManager),
           m_Computer(computer),
           m_Username(std::move(username)),
           m_Password(std::move(password)),
           m_MatchedDesktopMode(std::move(matchedDesktopMode)),
-          m_MatchedDesktopScale(matchedDesktopScale)
+          m_MatchedDesktopScale(matchedDesktopScale),
+          m_ExpectedAddress(std::move(expectedAddress)),
+          m_ExpectedServerUuid(std::move(expectedServerUuid)),
+          m_Assigned(std::move(assigned)), m_HostTrust(std::move(hostTrust))
     {
         connect(this, &PendingAuthenticationTask::authenticationCompleted,
-                computerManager, &ComputerManager::authenticationCompleted);
+                computerManager, [computerManager, requestId](NvComputer* target, const QString& error) {
+            if (requestId.isEmpty()) {
+                emit computerManager->authenticationCompleted(target, error);
+            } else {
+                QString id;
+                { QReadLocker lock(&target->lock); id = target->uuid; }
+                emit computerManager->assignedAuthenticationCompleted(requestId, id,
+                        error.isEmpty() ? QVariant() : error);
+            }
+        });
     }
 
     ~PendingAuthenticationTask()
@@ -707,9 +723,27 @@ private:
             NvAddress address;
             {
                 QReadLocker lock(&m_Computer->lock);
-                address = m_Computer->activeAddress;
+                if (!m_ExpectedAddress.isNull() &&
+                        (m_Computer->activeAddress != m_ExpectedAddress ||
+                         m_Computer->serverUuid != m_ExpectedServerUuid)) {
+                    throw GfeHttpResponseException(401, "Assigned workstation changed before sign-in");
+                }
+                address = m_ExpectedAddress.isNull() ? m_Computer->activeAddress : m_ExpectedAddress;
             }
             NvHTTP http(address);
+            if (m_Assigned) {
+                if (!m_HostTrust || !m_HostTrust->valid() || m_HostTrust->hostId != m_ExpectedServerUuid)
+                    throw GfeHttpResponseException(401, "Trusted workstation setup is required before sign-in");
+                http.setHostTrust(m_HostTrust, [state = m_Assigned] {
+                    QMutexLocker lock(&state->lock); return !state->cancelled;
+                });
+            }
+            if (!m_ExpectedAddress.isNull()) {
+                const auto info = http.getServerInfo(NvHTTP::NVLL_NONE, true);
+                if (NvHTTP::getXmlString(info, "uniqueid") != m_ExpectedServerUuid)
+                    throw GfeHttpResponseException(401, "Assigned workstation identity changed before sign-in");
+            }
+            if (m_Assigned) { QMutexLocker lock(&m_Assigned->lock); if (m_Assigned->cancelled) return; }
             bool greeter = false;
             const QString token = http.authenticate(m_Username, m_Password, &greeter);
             NvOutputTopology topology;
@@ -729,6 +763,29 @@ private:
                 topology = macDesktop ? http.prepareMacDisplay(desktopMode, appleEncodingMode, m_MatchedDesktopScale) : http.getOutputTopology();
             }
             const QVector<NvApp> apps = http.getAppList();
+            if (!m_ExpectedAddress.isNull()) {
+                QReadLocker lock(&m_Computer->lock);
+                if (m_Computer->activeAddress != m_ExpectedAddress || m_Computer->serverUuid != m_ExpectedServerUuid)
+                    throw GfeHttpResponseException(401, "Assigned workstation changed during sign-in");
+            }
+            if (m_Assigned) {
+                QMutexLocker resultLock(&m_Assigned->lock);
+                if (m_Assigned->cancelled) return;
+                QReadLocker computerLock(&m_Computer->lock);
+                auto result = std::make_unique<NvComputer>(*m_Computer);
+                result->assignedHostTrust = m_HostTrust;
+                result->sessionToken = token;
+                result->authorizationState = NvComputer::AS_AUTHORIZED;
+                if (topologySupported) result->outputTopology = topology;
+                result->updateAppList(apps);
+                m_Assigned->computer = std::move(result);
+                m_Assigned->username = std::move(m_Username);
+                m_Assigned->password = std::move(m_Password);
+                computerLock.unlock();
+                resultLock.unlock();
+                emit authenticationCompleted(m_Computer, nullptr);
+                return;
+            }
             m_ComputerManager->rememberPlankReconnectCredentials(
                         m_Computer, m_Username, std::move(m_Password));
             m_Password.fill(QChar('\0'));
@@ -764,10 +821,15 @@ private:
     QString m_Password;
     QString m_MatchedDesktopMode;
     int m_MatchedDesktopScale;
+    NvAddress m_ExpectedAddress;
+    QString m_ExpectedServerUuid;
+    std::shared_ptr<AssignedAuthentication> m_Assigned;
+    TeraguchiStudio::HostLease m_HostTrust;
 };
 
 void ComputerManager::authenticateHost(NvComputer* computer, QString username,
-                                       QString password)
+                                       QString password, NvAddress expectedAddress,
+                                       QString expectedServerUuid, QString requestId, TeraguchiStudio::HostLease hostTrust)
 {
     QString matchedMode;
     int matchedScale = 1;
@@ -790,7 +852,8 @@ void ComputerManager::authenticateHost(NvComputer* computer, QString username,
             for (uint32_t index = 0; index < count; ++index) {
                 SDL_DisplayMode mode;
                 SDL_Rect safeArea;
-                if (!StreamUtils::getMacCurrentDisplayMode(ids[index], &mode, &safeArea)) {
+                if (!StreamUtils::getMacCurrentDisplayMode(ids[index], &mode, &safeArea,
+                        m_Prefs->windowMode != StreamingPreferences::WM_WINDOWED)) {
                     displays.clear();
                     break;
                 }
@@ -811,15 +874,51 @@ void ComputerManager::authenticateHost(NvComputer* computer, QString username,
             password.fill(QChar('\0'));
             // Preserve the asynchronous completion contract even for local
             // validation errors, so callers can finish opening their wait UI.
-            QMetaObject::invokeMethod(this, [this, computer, error]() {
-                emit authenticationCompleted(computer, error);
+            QMetaObject::invokeMethod(this, [this, computer, error, requestId]() {
+                if (requestId.isEmpty()) emit authenticationCompleted(computer, error);
+                else {
+                    QString id;
+                    { QReadLocker lock(&computer->lock); id = computer->uuid; }
+                    emit assignedAuthenticationCompleted(requestId, id, error);
+                }
             }, Qt::QueuedConnection);
             return;
         }
     }
+    std::shared_ptr<AssignedAuthentication> assigned;
+    if (!requestId.isEmpty()) {
+        assigned = std::make_shared<AssignedAuthentication>();
+        m_AssignedAuthentications.insert(requestId, assigned);
+    }
     PendingAuthenticationTask* authentication = new PendingAuthenticationTask(
-        this, computer, std::move(username), std::move(password), matchedMode, matchedScale);
+        this, computer, std::move(username), std::move(password), matchedMode, matchedScale,
+        std::move(expectedAddress), std::move(expectedServerUuid), std::move(requestId), std::move(assigned), std::move(hostTrust));
     QThreadPool::globalInstance()->start(authentication);
+}
+
+void ComputerManager::cancelAssignedAuthentication(const QString& requestId)
+{
+    auto result = m_AssignedAuthentications.take(requestId);
+    if (!result) return;
+    QMutexLocker lock(&result->lock);
+    result->cancelled = true;
+    result->password.fill(QChar(0));
+    result->password.clear();
+    result->username.clear();
+    result->computer.reset();
+}
+
+std::unique_ptr<NvComputer> ComputerManager::takeAssignedAuthentication(
+        const QString& requestId, QString& username, QString& password)
+{
+    auto result = m_AssignedAuthentications.take(requestId);
+    if (!result) return {};
+    QMutexLocker lock(&result->lock);
+    if (result->cancelled || !result->computer) return {};
+    result->cancelled = true;
+    username = std::move(result->username);
+    password = std::move(result->password);
+    return std::move(result->computer);
 }
 
 void ComputerManager::rememberPlankReconnectCredentials(

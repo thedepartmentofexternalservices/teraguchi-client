@@ -1,4 +1,11 @@
 #include "session.h"
+#include "backend/teraguchi/assignmentwatch.h"
+#include "backend/teraguchi/macinputaccess.h"
+#include "video/teraguchivideo.h"
+#ifdef Q_OS_MACOS
+#include "input/macpen.h"
+#include "macpresentationwindows.h"
+#endif
 #include "streaming/clientframeflowtrace.h"
 #include "backend/hostrecovery.h"
 #include "backend/planknetwork.h"
@@ -12,6 +19,12 @@
 #endif
 #include "backend/computermanager.h"
 #include "backend/nvaddress.h"
+#ifdef Q_OS_MACOS
+#include "macapplication.h"
+#endif
+#ifdef Q_OS_DARWIN
+#include "streaming/macwindow.h"
+#endif
 
 #include <Limelight.h>
 #include <SDL3/SDL.h>
@@ -339,6 +352,82 @@ void Session::postTabletCursorActivationEvent()
     SDL_PushEvent(&event);
 }
 
+void Session::rejectVideoContract()
+{
+    // Keep this terminal state even if the event queue is full or reconnect
+    // consumes the wakeup. The session loop checks it before processing events.
+    m_VideoContractRejected.store(true);
+    SDL_Event event{};
+    event.type = SDL_EVENT_USER;
+    event.user.code = SDL_CODE_VIDEO_CONTRACT_REJECTED;
+    if (!SDL_PushEvent(&event)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Unable to queue video rejection wakeup: %s", SDL_GetError());
+    }
+}
+
+void Session::rejectPenInput()
+{
+    // The input handler runs on this session's event loop. Check before the
+    // next wait; session teardown releases any pen state left on the host.
+    m_PenInputRejected.store(true);
+}
+
+#ifdef Q_OS_MACOS
+void Session::rejectKeyboardInput(bool permissionFailure)
+{
+    m_KeyboardInputRejected = true;
+    m_KeyboardPermissionFailure = m_KeyboardPermissionFailure || permissionFailure;
+}
+
+void Session::resetMacPenToolbar()
+{
+    if (m_ToolbarPenButtons && m_PlankToolbar) m_PlankToolbar->notifyFocusLost();
+    m_ToolbarPen = 0;
+    m_ToolbarPenButtons = 0;
+}
+
+bool Session::routeMacPenToToolbar(SDL_PenID pen, SDL_WindowID window, float x, float y,
+                                  SDL_PenInputFlags state, Uint64 timestamp)
+{
+    if (!m_PlankToolbar || window != SDL_GetWindowID(m_Window)) return false;
+    if (pen != m_ToolbarPen) resetMacPenToolbar();
+    m_ToolbarPen = pen;
+    SDL_MouseMotionEvent motion{};
+    motion.type = SDL_EVENT_MOUSE_MOTION;
+    motion.timestamp = timestamp; motion.windowID = window;
+    motion.which = SDL_PEN_MOUSEID; motion.x = x; motion.y = y;
+    m_PlankToolbar->observeMouseMotion(motion);
+    bool consumed = false;
+    const auto previous = m_ToolbarPenButtons;
+    m_ToolbarPenButtons = state & (SDL_PEN_INPUT_DOWN |
+            SDL_PEN_INPUT_BUTTON_1 | SDL_PEN_INPUT_BUTTON_2);
+    const struct { SDL_PenInputFlags flag; Uint8 button; } buttons[] = {
+        {SDL_PEN_INPUT_DOWN, SDL_BUTTON_LEFT},
+        {SDL_PEN_INPUT_BUTTON_1, SDL_BUTTON_RIGHT},
+        {SDL_PEN_INPUT_BUTTON_2, SDL_BUTTON_MIDDLE},
+    };
+    for (const auto& mapping : buttons) {
+        if (!((previous ^ state) & mapping.flag)) continue;
+        SDL_MouseButtonEvent event{};
+        event.down = (state & mapping.flag) != 0;
+        event.type = event.down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+        event.timestamp = timestamp; event.windowID = window;
+        event.which = SDL_PEN_MOUSEID; event.button = mapping.button;
+        event.x = x; event.y = y;
+        const auto action = m_PlankToolbar->handleMouseButton(event);
+        consumed = consumed || action != PlankToolbar::Action::None;
+        if (action == PlankToolbar::Action::Disconnect) m_PenDisconnectRequested = true;
+        else if (action == PlankToolbar::Action::ToggleFullscreen) {
+            toggleFullscreen(); m_PlankToolbar->notifyWindowChanged();
+        } else if (action == PlankToolbar::Action::Minimize) {
+            minimizePresentationWindows();
+        }
+    }
+    return consumed;
+}
+#endif
+
 void Session::updateVideoFecLoss(VideoFecLossPercent loss)
 {
     Session* session = s_ActiveSession;
@@ -394,7 +483,7 @@ bool Session::chooseDecoder(DecoderSelectionMode selectionMode,
 
 #ifdef HAVE_SLVIDEO
     chosenDecoder = new SLVideoDecoder(testOnly);
-    if (chosenDecoder->initialize(&params)) {
+    if (TeraguchiVideo::initializeDecoder(*chosenDecoder, params)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "SLVideo video decoder chosen");
         return true;
@@ -409,7 +498,7 @@ bool Session::chooseDecoder(DecoderSelectionMode selectionMode,
 
 #ifdef HAVE_FFMPEG
     chosenDecoder = new FFmpegVideoDecoder(testOnly);
-    if (chosenDecoder->initialize(&params)) {
+    if (TeraguchiVideo::initializeDecoder(*chosenDecoder, params)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "FFmpeg-based video decoder chosen");
         return true;
@@ -442,6 +531,13 @@ bool Session::isIdentityGbrEnabledForFormat(int videoFormat) const
 
 int Session::drSetup(int videoFormat, int width, int height, int frameRate, void *, int)
 {
+    const auto& expected = s_ActiveSession->m_StreamConfig;
+    if (!TeraguchiVideo::acceptsStream(videoFormat, width, height, frameRate,
+                                       expected.width, expected.height, expected.fps)) {
+        emit s_ActiveSession->displayLaunchError(
+                    tr("The stream does not match the requested Teraguchi video format or dimensions."));
+        return -1;
+    }
     s_ActiveSession->m_ActiveVideoFormat = videoFormat;
     s_ActiveSession->m_ActiveVideoWidth = width;
     s_ActiveSession->m_ActiveVideoHeight = height;
@@ -632,7 +728,11 @@ bool Session::populateDecoderProperties(SDL_Window* window)
         m_VideoCallbacks.submitDecodeUnit = drSubmitDecodeUnit;
     }
 
-    if (m_PlankCaptureSource == StreamingPreferences::PLANK_CAPTURE_SCREENCAPTUREKIT) {
+    if (TeraguchiVideo::Required) {
+        m_StreamConfig.colorSpace = COLORSPACE_IDENTITY_GBR;
+        m_StreamConfig.colorRange = COLOR_RANGE_FULL;
+    }
+    else if (m_PlankCaptureSource == StreamingPreferences::PLANK_CAPTURE_SCREENCAPTUREKIT) {
         // This profile has an exact, negotiated color contract. An environment
         // override must not reinterpret its YCbCr samples as full-range or RGB.
         m_StreamConfig.colorSpace = COLORSPACE_REC_709;
@@ -749,6 +849,71 @@ Session::Session(NvComputer* computer, NvApp& app,
         // chroma sampling, and identity mapping; otherwise the same profile
         // falls back to FFmpeg software decoding without changing formats.
     }
+}
+
+void Session::bindAssignedTarget(TailscaleWorkstations* provider, const QVariantMap& target, int displays, TeraguchiStudio::Lease permit)
+{
+    m_StudioPermit = std::move(permit);
+    // Keep all route, topology and reconnect reads session-local.
+    m_AssignedComputer = std::make_unique<NvComputer>(*m_Computer);
+    m_Computer = m_AssignedComputer.get();
+    m_ComputerManager = nullptr; // Never persist session-local route/topology changes.
+    m_Computer->plankHostLayout = NvOutputTopology::MatchClientHostLayout;
+    m_AssignedDisplayCount = displays;
+    if (!m_Computer->assignedHostTrust || m_Computer->assignedHostTrust->setup != m_StudioPermit ||
+            m_Computer->assignedHostTrust->nodeId != target.value("id").toString() ||
+            m_Computer->assignedHostTrust->hostId != target.value("hostId").toString())
+        m_DisconnectRequested.store(true);
+    m_AllowActiveSessionTakeover = false;
+    m_AssignmentWatch = std::make_unique<AssignmentWatch>(provider->studioDnsSuffix(), target, provider->remainingValidityMs(), QString(), QStringList(), m_StudioPermit);
+    connect(m_AssignmentWatch.get(), &AssignmentWatch::assignmentRemoved, this, [this] {
+        requestDisconnect();
+        emit displayLaunchError(tr("Your workstation assignment changed. Refresh the list before connecting again."));
+    }, Qt::DirectConnection);
+}
+
+void Session::validateAssignedEndpoint()
+{
+    if (!m_AssignmentWatch) return;
+    if (!m_StudioPermit || !m_StudioPermit->valid() || !m_Computer->assignedHostTrust ||
+            m_Computer->assignedHostTrust->setup != m_StudioPermit || !m_Computer->assignedHostTrust->valid() ||
+            m_Computer->assignedHostTrust->hostId != m_Computer->serverUuid)
+        throw GfeHttpResponseException(401, "Trusted workstation setup expired or changed; import a current setup file");
+    if (!MacDisplayBinding::current(m_AssignedDisplays))
+        throw GfeHttpResponseException(401, "Selected displays changed; start a new connection");
+    if (!MacInputAccess::query().ready())
+        throw GfeHttpResponseException(401, "Mac input permissions changed; check Accessibility and Input Monitoring");
+    if (m_DisconnectRequested.load() || !m_AssignmentWatch->permitsConnection())
+        throw GfeHttpResponseException(401, "Workstation assignment needs a fresh check");
+    // Use a credential-free probe before any session-token or PAM request.
+    NvHTTP probe(m_Computer->activeAddress);
+    probe.setHostTrust(m_Computer->assignedHostTrust, [this] {
+        return !m_DisconnectRequested.load() && m_AssignmentWatch && m_AssignmentWatch->permitsConnection();
+    });
+    const auto info = probe.getServerInfo(NvHTTP::NVLL_NONE, true);
+    if (NvHTTP::getXmlString(info, "uniqueid") != m_Computer->serverUuid) {
+        requestDisconnect();
+        throw GfeHttpResponseException(401, "Workstation identity changed; refresh before connecting again");
+    }
+    if (m_DisconnectRequested.load() || !m_AssignmentWatch->permitsConnection())
+        throw GfeHttpResponseException(401, "Workstation assignment changed during verification");
+}
+
+void Session::setAssignedCredentials(QString username, QString password)
+{
+    m_PlankUsername = std::move(username);
+    m_PlankPassword = std::move(password);
+    m_CanReconnect.store(!m_PlankUsername.isEmpty() && !m_PlankPassword.isEmpty());
+}
+
+void Session::requestDisconnect()
+{
+    // Callable from the assignment worker even while SDL owns the main thread.
+    // Use a sticky flag, not a global SDL Quit event that could hit a later session.
+    m_DisconnectRequested.store(true);
+    m_ReconnectCancelled.store(true);
+    m_CanReconnect.store(false);
+    cancelConnectionStart();
 }
 
 Session::~Session()
@@ -1132,6 +1297,9 @@ void Session::startPlankTransportMediaReceivers()
     m_CurrentNetworkRttMs.store(0, std::memory_order_relaxed);
     m_LastPlankVideoReceived.store(0);
     m_PlankTransportReceiversStopping.store(false);
+#ifdef Q_OS_MACOS
+    startClipboardSync();
+#endif
     m_PlankTransportVideoThread = std::thread([this]() {
         plankTransportVideoReceiveLoop();
     });
@@ -1143,15 +1311,12 @@ void Session::startPlankTransportMediaReceivers()
     m_PlankTransportDataThread = std::thread([this]() {
         plankTransportDataReceiveLoop();
     });
-#ifdef Q_OS_MACOS
-    startClipboardSync();
-#endif
 }
 
 void Session::stopPlankTransportMediaReceivers()
 {
 #ifdef Q_OS_MACOS
-    stopClipboardSync();
+    stopClipboardPollTimer();
 #endif
     m_PlankTransportReceiversStopping.store(true);
     if (m_PlankTransportVideoThread.joinable()) {
@@ -1163,6 +1328,9 @@ void Session::stopPlankTransportMediaReceivers()
     if (m_PlankTransportDataThread.joinable()) {
         m_PlankTransportDataThread.join();
     }
+#ifdef Q_OS_MACOS
+    stopClipboardSync();
+#endif
 }
 
 void Session::plankTransportVideoReceiveLoop()
@@ -1526,17 +1694,20 @@ void Session::startClipboardSync()
                                    payload,
                                    size) == PLANK_TRANSPORT_OK;
                     },
+                    [this] { return anyPresentationWindowFocused(); },
                     [this] { return clipboardSyncEnabled(); },
-                    [this](std::vector<std::uint8_t> text) {
-                        auto* payload = new std::vector<std::uint8_t>(std::move(text));
+                    [] {
                         SDL_Event event {};
                         event.type = SDL_EVENT_USER;
                         event.user.code = SDL_CODE_PLANK_CLIPBOARD;
-                        event.user.data1 = payload;
                         event.user.timestamp = SDL_GetTicks();
                         if (!SDL_PushEvent(&event)) {
-                            delete payload;
+                            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                         "Unable to queue host clipboard offer: %s",
+                                         SDL_GetError());
+                            return false;
                         }
+                        return true;
                     });
     }
     m_ClipboardSync->start();
@@ -1554,51 +1725,24 @@ void Session::stopClipboardSync()
 
 void Session::queueClipboardPollEvent()
 {
-    SDL_Event event {};
-    event.type = SDL_EVENT_USER;
-    event.user.code = SDL_CODE_PLANK_CLIPBOARD_POLL;
-    event.user.timestamp = SDL_GetTicks();
-    SDL_PushEvent(&event);
+    ClipboardPollTimer::queue(SDL_CODE_PLANK_CLIPBOARD_POLL);
 }
-
-namespace {
-
-Uint32 clipboardPollTimerCallback(void*, SDL_TimerID, Uint32 interval)
-{
-    SDL_Event event {};
-    event.type = SDL_EVENT_USER;
-    event.user.code = SDL_CODE_PLANK_CLIPBOARD_POLL;
-    event.user.timestamp = SDL_GetTicks();
-    SDL_PushEvent(&event);
-    return interval;
-}
-
-}  // namespace
 
 void Session::startClipboardPollTimer()
 {
-    if (m_ClipboardPollTimerId != 0 || m_ClipboardSync == nullptr) {
-        return;
-    }
-    const SDL_TimerID timerId = SDL_AddTimer(250, clipboardPollTimerCallback, nullptr);
-    if (timerId == 0) {
+    if (m_ClipboardSync != nullptr &&
+            !m_ClipboardPollTimer.start(SDL_CODE_PLANK_CLIPBOARD_POLL)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "Failed to start clipboard poll timer: %s",
                     SDL_GetError());
-        return;
     }
-    m_ClipboardPollTimerId = timerId;
-    queueClipboardPollEvent();
 }
 
 void Session::stopClipboardPollTimer()
 {
-    if (m_ClipboardPollTimerId == 0) {
-        return;
-    }
-    SDL_RemoveTimer(m_ClipboardPollTimerId);
-    m_ClipboardPollTimerId = 0;
+    m_ClipboardPollTimer.stop();
 }
+
 #endif
 
 void Session::clearPlankReconnectCredentials()
@@ -1611,12 +1755,36 @@ void Session::clearPlankReconnectCredentials()
 
 bool Session::initialize()
 {
+    if (m_AssignedDisplayCount && (!m_StudioPermit || !m_StudioPermit->valid())) {
+        emit displayLaunchError(tr("Studio setup has expired. Import a current setup file, then connect again."));
+        return false;
+    }
+    if (m_AssignedDisplayCount && !MacInputAccess::query().ready()) {
+        emit displayLaunchError(tr("Allow Accessibility and Input Monitoring for this client, then connect again."));
+        return false;
+    }
+    if (!TeraguchiVideo::acceptsCapture(decoderCaptureSource())) {
+        emit displayLaunchError(tr("Teraguchi requires Native X11/XShm 10-bit capture. "
+                                   "This bookmark uses a different capture source; its settings have not been changed."));
+        return false;
+    }
+    if (TeraguchiVideo::Required && m_PlankVideoProfile !=
+            StreamingPreferences::PLANK_PROFILE_NVENC_HEVC_10BIT_444) {
+        emit displayLaunchError(tr("Teraguchi requires the HEVC 10-bit 4:4:4 NVENC profile. "
+                                   "This bookmark uses a different encoding profile; its settings have not been changed."));
+        return false;
+    }
+    if (TeraguchiVideo::Required &&
+            (qEnvironmentVariableIsSet("COLOR_SPACE_OVERRIDE") ||
+             qEnvironmentVariableIsSet("COLOR_RANGE_OVERRIDE"))) {
+        emit displayLaunchError(tr("Custom color overrides are incompatible with Teraguchi's exact video profile. "
+                                   "Remove them before connecting."));
+        return false;
+    }
 #ifdef Q_OS_DARWIN
-    // AppKit fullscreen Spaces restrict the content to the area below the
-    // camera housing. Use SDL's borderless desktop fullscreen over the entire
-    // display instead, without selecting an exclusive display mode. The
-    // toolbar separately avoids the camera housing; video retains exact pixels.
-    SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
+    // Keep native fullscreen Spaces, including trackpad app switching. Match
+    // Client uses the notch-safe viewport; never switch the desktop mode.
+    SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "1");
 #endif
 
     if (!StreamingPreferences::isPlankProfileValidForCaptureSource(
@@ -1763,7 +1931,15 @@ bool Session::initialize()
         m_SupportedVideoFormats.append(selectedVideoFormat);
     }
 
-    SDL_assert(m_SupportedVideoFormats.size() == 1);
+    // Missing identity support must fail in release builds too, before a
+    // decoder can be probed with an empty or substituted profile.
+    if (!TeraguchiVideo::acceptsFormat(decoderEncoderBackend(), selectedVideoFormat,
+                                       isIdentityGbrEnabledForFormat(selectedVideoFormat))) {
+        emit displayLaunchError(tr("The host cannot provide Teraguchi's exact HEVC 4:4:4 10-bit identity color profile."));
+        SDL_DestroyWindow(testWindow);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        return false;
+    }
 
     // Check for validation errors/warnings and emit
     // signals for them, if appropriate
@@ -1817,10 +1993,8 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         return false;
     }
 
-    // Internal exact-profile decoder selection may legitimately choose
-    // software when no hardware path reproduces the selected profile. That is
-    // an expected capability result, so do not interrupt each connection with
-    // a warning.
+    // The shared decoder boundary enforces the build's policy, including
+    // hardware-only Teraguchi probes. Ordinary PLANK keeps exact software fallback.
     while (!m_SupportedVideoFormats.isEmpty()) {
         const auto availability = getDecoderAvailability(
                     testWindow,
@@ -1837,7 +2011,10 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         }
     }
     if (m_SupportedVideoFormats.isEmpty()) {
-        emit displayLaunchError(tr("This client cannot decode the selected PLANK encoding profile."));
+        emit displayLaunchError(TeraguchiVideo::Required ?
+                    tr("This Mac cannot hardware-decode the required HEVC 4:4:4 10-bit profile. "
+                       "Teraguchi will not fall back to software decoding.") :
+                    tr("This client cannot decode the selected PLANK encoding profile."));
         return false;
     }
 
@@ -1881,6 +2058,9 @@ private:
 
     void run() override
     {
+#ifdef Q_OS_MACOS
+        if (!m_Session->m_ApplicationExitRequested.load())
+#endif
         emit m_Session->sessionFinished();
 
         // The video decoder must already be destroyed, since it could
@@ -1902,6 +2082,7 @@ private:
 
 int Session::getTargetDisplayIndex() const
 {
+    if (m_AssignedDisplayCount) return StreamUtils::getDisplayIndex(m_TargetDisplayId);
     int displayIndex = 0;
 
     if (m_Window != nullptr) {
@@ -1954,9 +2135,82 @@ int Session::getTargetDisplayIndex() const
     return displayIndex;
 }
 
+bool Session::usesMacOutputPair() const
+{
+#ifdef Q_OS_MACOS
+    return m_AssignedDisplayCount == 2;
+#else
+    return false;
+#endif
+}
+
+bool Session::usesMacBorderlessPresentation() const
+{
+#ifdef Q_OS_MACOS
+    return m_AssignedDisplayCount >= 1 && m_AssignedDisplayCount <= 2;
+#else
+    return false;
+#endif
+}
+
+bool Session::assignedWindowsCurrent() const
+{
+    if (!m_AssignedDisplayCount) return true;
+    if (m_ClientDisplays.size() != m_AssignedDisplayCount ||
+            m_SecondaryWindows.size() != m_AssignedDisplayCount - 1) return false;
+    int secondary = 0;
+    for (const auto& display : m_ClientDisplays) {
+        auto* window = display.displayId == m_TargetDisplayId ? m_Window : m_SecondaryWindows.value(secondary++, nullptr);
+        SDL_Rect bounds;
+        if (!window || !SDL_GetDisplayBounds(display.displayId, &bounds) ||
+                SDL_GetDisplayForWindow(window) != display.displayId ||
+                bounds.x != display.logicalBounds.x || bounds.y != display.logicalBounds.y ||
+                bounds.w != display.logicalBounds.w || bounds.h != display.logicalBounds.h) return false;
+        if (usesMacBorderlessPresentation() && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN)) return false;
+    }
+    return true;
+}
+
 bool Session::snapshotClientDisplays()
 {
     m_ClientDisplays.clear();
+    if (m_AssignedDisplayCount) {
+        if (m_AssignedDisplays.outputs.size() != m_AssignedDisplayCount ||
+                !MacDisplayBinding::current(m_AssignedDisplays)) {
+            emit displayLaunchError(tr("The selected displays changed. Start a new connection after checking them."));
+            return false;
+        }
+        m_TargetDisplayId = 0;
+        int canvasX = 0;
+        QVector<MacDisplayBinding::Surface> surfaces;
+        for (int i = 0; i < StreamUtils::getDisplayCount(); ++i) {
+            SDL_Rect bounds;
+            const auto id = StreamUtils::getDisplayId(i);
+            if (!SDL_GetDisplayBounds(id, &bounds)) return false;
+            surfaces.append({id, QRect(bounds.x, bounds.y, bounds.w, bounds.h)});
+        }
+        const auto resolved = MacDisplayBinding::resolve(m_AssignedDisplays, surfaces);
+        if (resolved.size() != m_AssignedDisplayCount) {
+            emit displayLaunchError(tr("A selected display is unavailable to the streaming window."));
+            return false;
+        }
+        for (int i = 0; i < m_AssignedDisplayCount; ++i) {
+            const auto& selected = m_AssignedDisplays.outputs[i];
+            ClientDisplaySnapshot snapshot;
+            snapshot.displayId = resolved[i];
+            snapshot.logicalBounds = {selected.bounds.x(), selected.bounds.y(), selected.bounds.width(), selected.bounds.height()};
+            snapshot.nativeSize = selected.nativePixels;
+            snapshot.canvasRect = QRect(canvasX, 0, selected.nativePixels.width(), selected.nativePixels.height());
+            canvasX += selected.nativePixels.width();
+            if (selected.id == m_AssignedDisplays.primary) m_TargetDisplayId = snapshot.displayId;
+            m_ClientDisplays.append(snapshot);
+        }
+        m_UseMultiDisplayPresentation = m_AssignedDisplayCount == 2;
+#ifdef Q_OS_MACOS
+        MacPresentationWindows::logDisplaySpacePolicy();
+#endif
+        return m_TargetDisplayId && MacDisplayBinding::current(m_AssignedDisplays);
+    }
 #ifdef Q_OS_DARWIN
     bool matchMacDesktop;
     {
@@ -1966,9 +2220,11 @@ bool Session::snapshotClientDisplays()
     }
 #endif
     const int targetIndex = getTargetDisplayIndex();
+    if (targetIndex < 0) { emit displayLaunchError(tr("The selected client display is unavailable.")); return false; }
     m_TargetDisplayId = StreamUtils::getDisplayId(targetIndex);
     const int displayCount = StreamUtils::getDisplayCount();
     for (int index = 0; index < displayCount; ++index) {
+        if (m_AssignedDisplayCount && index != targetIndex) continue;
         ClientDisplaySnapshot snapshot;
         snapshot.displayId = StreamUtils::getDisplayId(index);
         SDL_DisplayMode nativeMode;
@@ -1987,7 +2243,11 @@ bool Session::snapshotClientDisplays()
 #ifdef Q_OS_DARWIN
         if (matchMacDesktop) {
             SDL_DisplayMode currentMode;
-            if (!StreamUtils::getMacCurrentDisplayModeForBounds(snapshot.logicalBounds, &currentMode)) return false;
+            SDL_Rect matchedBounds;
+            if (!StreamUtils::getMacCurrentDisplayModeForBounds(snapshot.logicalBounds,
+                    &currentMode, &matchedBounds, m_IsFullScreen)) return false;
+            snapshot.macMatchedBounds = QRect(matchedBounds.x, matchedBounds.y,
+                                             matchedBounds.w, matchedBounds.h);
             snapshot.macBackingSize = QSize(currentMode.w, currentMode.h);
             // Presentation tiles must share the matched backing-pixel canvas,
             // not mix differently scaled panel-native pixel dimensions.
@@ -2068,8 +2328,13 @@ void Session::rebuildPresentationLayout()
         return;
     }
 
+    if (usesMacOutputPair() && m_SecondaryWindows.size() != 1) {
+        requestDisconnect();
+        emit displayLaunchError(tr("The second presentation window is unavailable."));
+        return;
+    }
     const bool multiOutputActive = m_UseMultiDisplayPresentation &&
-            m_PresentationFullscreen && !m_SecondaryWindows.isEmpty();
+            (m_PresentationFullscreen || usesMacOutputPair()) && !m_SecondaryWindows.isEmpty();
     if (multiOutputActive) {
         int canvasWidth = 0;
         int canvasHeight = 0;
@@ -2201,6 +2466,41 @@ bool Session::anyPresentationWindowFocused() const
 
 void Session::setPresentationWindowsFullscreen(bool fullscreen)
 {
+#ifdef Q_OS_MACOS
+    if (usesMacBorderlessPresentation()) {
+        if (usesMacOutputPair() && m_SecondaryWindows.size() != 1) {
+            requestDisconnect();
+            emit displayLaunchError(tr("The second presentation window is unavailable."));
+            return;
+        }
+        bool placed = MacDisplayBinding::current(m_AssignedDisplays);
+        int secondary = 0;
+        for (const auto& display : m_ClientDisplays) {
+            auto* window = display.displayId == m_TargetDisplayId ? m_Window : m_SecondaryWindows.value(secondary++, nullptr);
+            const auto& bounds = display.logicalBounds;
+            if (!window || !MacPresentationWindows::place(window, display.displayId,
+                        QRect(bounds.x, bounds.y, bounds.w, bounds.h), fullscreen)) placed = false;
+        }
+        if (!placed) {
+            requestDisconnect();
+            emit displayLaunchError(tr("Both selected displays must remain available. The session has stopped."));
+            return;
+        }
+        m_PresentationFullscreen = fullscreen;
+        if (m_InputHandler) m_InputHandler->setPresentationFullscreen(fullscreen);
+        if (m_PlankToolbar) m_PlankToolbar->setPresentationFullscreen(fullscreen);
+        rebuildPresentationLayout();
+        // Place the complete pair before showing either surface.
+        bool shown = true;
+        for (auto* window : m_SecondaryWindows) if (!SDL_ShowWindow(window)) shown = false;
+        if (!SDL_ShowWindow(m_Window)) shown = false;
+        if (!shown) {
+            requestDisconnect();
+            emit displayLaunchError(tr("Unable to show both selected displays. The session has stopped."));
+        }
+        return;
+    }
+#endif
     m_PresentationFullscreen = fullscreen;
     if (!SDL_SetWindowFullscreen(m_Window,
                                  fullscreen ? m_FullScreenFlag : 0)) {
@@ -2258,9 +2558,13 @@ void Session::setPresentationWindowsFullscreen(bool fullscreen)
 
 void Session::minimizePresentationWindows()
 {
-    SDL_MinimizeWindow(m_Window);
+    bool minimized = SDL_MinimizeWindow(m_Window);
     for (SDL_Window* window : m_SecondaryWindows) {
-        SDL_MinimizeWindow(window);
+        if (!SDL_MinimizeWindow(window)) minimized = false;
+    }
+    if (usesMacOutputPair() && !minimized) {
+        requestDisconnect();
+        emit displayLaunchError(tr("Unable to minimize both displays. The session has stopped."));
     }
 }
 
@@ -2307,7 +2611,7 @@ bool Session::configurePlankHostLayout()
     if (layoutPolicy == NvOutputTopology::MatchClientHostLayout) {
         QVector<NvClientDisplay> displays;
         for (const auto& display : std::as_const(m_ClientDisplays)) {
-            displays.append({QRect(display.logicalBounds.x,
+            displays.append({display.macMatchedBounds.isValid() ? display.macMatchedBounds : QRect(display.logicalBounds.x,
                                    display.logicalBounds.y,
                                    display.logicalBounds.w,
                                    display.logicalBounds.h),
@@ -2508,6 +2812,11 @@ void Session::getWindowDimensions(int& x, int& y,
 
 void Session::updateOptimalWindowDisplayMode()
 {
+    if (m_AssignedDisplayCount) {
+        // The binding includes the current mode; opening a session must not change it.
+        SDL_SetWindowFullscreenMode(m_Window, nullptr);
+        return;
+    }
     bool preserveDesktopMode = strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0;
 #ifdef Q_OS_DARWIN
     preserveDesktopMode = true;
@@ -2626,7 +2935,8 @@ void Session::updateOptimalWindowDisplayMode()
 
 void Session::toggleFullscreen()
 {
-    bool fullScreen = !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
+    bool fullScreen = usesMacBorderlessPresentation() ? !m_PresentationFullscreen :
+            !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
 
     if (m_UseMultiDisplayPresentation) {
         SDL_LockSpinlock(&m_DecoderLock);
@@ -2694,6 +3004,11 @@ bool Session::startConnectionAsync(bool reconnecting,
         SDL_Delay(1500);
     }
 
+    if (m_DisconnectRequested.load() || (m_AssignmentWatch && !m_AssignmentWatch->permitsConnection())) {
+        emit displayLaunchError(tr("The workstation assignment needs a fresh check before connecting."));
+        return false;
+    }
+
     // PLANK never terminates a host application remotely. Only resume
     // the already-running Desktop application or launch it from an idle host.
     Q_ASSERT(m_Computer->currentGameId == 0 ||
@@ -2742,6 +3057,9 @@ bool Session::startConnectionAsync(bool reconnecting,
 
     try {
         std::unique_ptr<NvHTTP> http = std::make_unique<NvHTTP>(m_Computer);
+        if (m_AssignmentWatch) http->setHostTrust(m_Computer->assignedHostTrust, [this] {
+            return !m_DisconnectRequested.load() && m_AssignmentWatch->permitsConnection();
+        });
         if (reconnecting) http->setRequestGate([this](bool auth) { return waitForPlankReconnectRequest(auth); });
         const QString captureSource =
                 m_PlankCaptureSource == StreamingPreferences::PLANK_CAPTURE_SCREENCAPTUREKIT ?
@@ -2788,6 +3106,7 @@ bool Session::startConnectionAsync(bool reconnecting,
             return false;
         }
         const auto startApp = [&]() {
+            validateAssignedEndpoint();
             if (macCapture) {
                 QString pin;
                 const NvOutputTopology topology = http->getOutputTopology(&pin);
@@ -2896,7 +3215,11 @@ bool Session::startConnectionAsync(bool reconnecting,
                                 m_Computer->authorizationState = NvComputer::AS_UNAUTHORIZED;
                                 m_Computer->currentGameId = 0;
                             }
+                            validateAssignedEndpoint();
                             http = std::make_unique<NvHTTP>(m_Computer);
+                            if (m_AssignmentWatch) http->setHostTrust(m_Computer->assignedHostTrust, [this] {
+                                return !m_DisconnectRequested.load() && m_AssignmentWatch->permitsConnection();
+                            });
                             if (reconnecting) http->setRequestGate([this](bool auth) { return waitForPlankReconnectRequest(auth); });
                             const QString token = http->authenticate(
                                         m_PlankUsername,
@@ -2994,7 +3317,7 @@ bool Session::startConnectionAsync(bool reconnecting,
                     qInfo() << "PLANK reconnect stopped because another client owns the active session";
                     return false;
                 }
-                if (takeOverActiveSession ||
+                if (!m_AllowActiveSessionTakeover || takeOverActiveSession ||
                         (m_Computer->plankFeatureFlags &
                          NvOutputTopology::SessionTakeoverFeature) == 0) {
                     emit displayLaunchError(
@@ -3208,6 +3531,7 @@ bool Session::startConnectionAsync(bool reconnecting,
         return false;
     }
 
+    if (m_DisconnectRequested.load()) return false;
     emit connectionStarted();
     return true;
 }
@@ -3292,7 +3616,11 @@ bool Session::beginPlankReconnect(
     stopPlankTransportDataPlane();
     m_InputHandler->resetRemoteCursorPositionEpoch();
     m_ReconnectCancelled.store(false);
-    m_ConnectionStartCancelled.store(false);
+    m_ConnectionStartCancelled.store(m_DisconnectRequested.load()
+#ifdef Q_OS_MACOS
+                                    || m_ApplicationExitRequested.load()
+#endif
+                                    );
     return true;
 }
 
@@ -3327,6 +3655,11 @@ bool Session::runPlankReconnect()
         m_Computer->currentGameId = 0;
     }
     for (int attempt = 1; waitForPlankReconnectRequest(); ++attempt) {
+        if (m_DisconnectRequested.load()) return false;
+        if (m_AssignmentWatch && !m_AssignmentWatch->permitsConnection()) {
+            SDL_Delay(50);
+            continue;
+        }
         bool authenticating = false;
         try {
             QString token;
@@ -3335,6 +3668,10 @@ bool Session::runPlankReconnect()
                 token = m_Computer->sessionToken;
             }
             NvHTTP http(m_Computer);
+            if (m_AssignmentWatch) http.setHostTrust(m_Computer->assignedHostTrust, [this] {
+                return !m_DisconnectRequested.load() && m_AssignmentWatch->permitsConnection();
+            });
+            validateAssignedEndpoint();
             http.setRequestGate([this](bool auth) { return waitForPlankReconnectRequest(auth); });
             if (token.isEmpty()) {
                 authenticating = true;
@@ -3367,7 +3704,7 @@ bool Session::runPlankReconnect()
                 if (macDesktop && m_Computer->plankHostLayout == NvOutputTopology::MatchClientHostLayout) {
                     QVector<NvClientDisplay> displays;
                     for (const auto& display : std::as_const(m_ClientDisplays)) {
-                        displays.append({QRect(display.logicalBounds.x, display.logicalBounds.y,
+                        displays.append({display.macMatchedBounds.isValid() ? display.macMatchedBounds : QRect(display.logicalBounds.x, display.logicalBounds.y,
                                                display.logicalBounds.w, display.logicalBounds.h), display.nativeSize, display.macBackingSize});
                     }
                     desktopMode = NvOutputTopology::resolveMacClientDisplayMode(displays, nullptr, &desktopScale);
@@ -3469,7 +3806,11 @@ bool Session::finishPlankReconnect(
     setPlankReconnectStatus("", false);
     m_ReconnectRequested = false;
     m_ReconnectCancelled.store(false);
-    m_ConnectionStartCancelled.store(false);
+    m_ConnectionStartCancelled.store(m_DisconnectRequested.load()
+#ifdef Q_OS_MACOS
+                                    || m_ApplicationExitRequested.load()
+#endif
+                                    );
     m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
 
     m_OverlayManager.setOverlayColor(Overlay::OverlayStatusUpdate, {0xCC, 0x00, 0x00, 0xFF});
@@ -3488,6 +3829,11 @@ bool Session::finishPlankReconnect(
     if (state.inputCaptureWasActive) {
         m_InputHandler->setCaptureActive(true);
     }
+#ifdef Q_OS_MACOS
+    // Receiver teardown removes this timer on every reconnect attempt. Resume
+    // periodic polling only after success, back on the SDL/AppKit main thread.
+    startClipboardPollTimer();
+#endif
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "PLANK reconnect completed (%s renderer)",
                 resumedRenderer ? "retained" : "recreated");
@@ -3577,7 +3923,7 @@ void Session::flushWindowEvents()
     // Wayland Wacom subsurface explicitly; native wl_surface proxy addresses
     // alone cannot identify a replacement reliably.
     if (m_InputHandler != nullptr) {
-        m_InputHandler->refreshWaylandTabletCursorParents();
+        m_InputHandler->refreshTabletCursorParents();
     }
 
     // Insert a barrier to discard any additional window events.
@@ -3612,7 +3958,30 @@ public:
 
 void Session::exec(QWindow* qtWindow)
 {
+#ifdef Q_OS_MACOS
+    auto* application = static_cast<MacApplication*>(QCoreApplication::instance());
+    if (!application->beginSession()) {
+        emit readyForDeletion();
+        return;
+    }
+    const auto exitConnection = connect(application, &MacApplication::exitRequested,
+                                       this, [this] {
+        m_ApplicationExitRequested.store(true);
+        cancelConnectionStart();
+        m_ReconnectCancelled.store(true);
+        m_CanReconnect.store(false);
+    });
+    // sessionFinished precedes asynchronous transport cleanup. Only this
+    // later signal releases application ownership. Queue onto Qt's thread;
+    // the Session itself may already have been garbage-collected by QML.
+    connect(this, &Session::readyForDeletion, application,
+            [application, exitConnection] {
+        QObject::disconnect(exitConnection);
+        application->endSession();
+    }, Qt::QueuedConnection);
+#endif
     m_QtWindow = qtWindow;
+    if (m_AssignmentWatch) m_AssignmentWatch->start();
 
     // Use a separate thread for the streaming session on X11 or Wayland
     // to ensure we don't stomp on Qt's GL context. This breaks when using
@@ -3628,7 +3997,7 @@ void Session::exec(QWindow* qtWindow)
         // to update the Qt UI to allow warning messages to display and
         // make sure that the Qt window can hide itself.
         while (!execThread.wait(10) && m_Window == nullptr) {
-            const bool allowUserInput =
+            const bool allowUserInput = m_AssignedDisplayCount != 0 ||
                     m_WaitingForSessionCleanup.load() ||
                     m_WaitingForActiveSessionTakeoverDecision.load();
             QCoreApplication::processEvents(
@@ -3637,7 +4006,7 @@ void Session::exec(QWindow* qtWindow)
                             QEventLoop::ExcludeUserInputEvents);
             QCoreApplication::sendPostedEvents();
         }
-        const bool allowUserInput =
+        const bool allowUserInput = m_AssignedDisplayCount != 0 ||
                 m_WaitingForSessionCleanup.load() ||
                 m_WaitingForActiveSessionTakeoverDecision.load();
         QCoreApplication::processEvents(
@@ -3654,17 +4023,32 @@ void Session::exec(QWindow* qtWindow)
         // Run the streaming session on the main thread for Windows and macOS
         execInternal();
     }
+    if (m_AssignmentWatch) { m_AssignmentWatch->requestInterruption(); m_AssignmentWatch->quit(); m_AssignmentWatch->wait(); }
 }
 
 void Session::execInternal()
 {
+#ifdef Q_OS_MACOS
+    MacPresentationWindows::SystemUiScope systemUi;
+#endif
     // Complete initialization in this deferred context to avoid
     // calling expensive functions in the constructor (during the
     // process of loading the StreamSegue).
     //
     // NB: This initializes the SDL video subsystem, so it must be
     // called on the main thread.
-    if (!initialize()) {
+    const bool initialized = !m_DisconnectRequested.load() && initialize();
+    if (!initialized
+#ifdef Q_OS_MACOS
+            || m_ApplicationExitRequested.load()
+#endif
+            ) {
+#ifdef Q_OS_MACOS
+        if (initialized) {
+            SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        }
+        if (!m_ApplicationExitRequested.load())
+#endif
         emit sessionFinished();
         emit readyForDeletion();
         return;
@@ -3684,13 +4068,17 @@ void Session::execInternal()
                                          m_StreamConfig.width,
                                          m_StreamConfig.height);
 
-    m_ConnectionStartCancelled.store(false);
+    m_ConnectionStartCancelled.store(m_DisconnectRequested.load()
+#ifdef Q_OS_MACOS
+                                    || m_ApplicationExitRequested.load()
+#endif
+                                    );
     AsyncConnectionStartThread asyncConnThread(this);
     if (!m_ThreadedExec) {
         // Kick off the async connection thread while we sit here and pump the event loop
         asyncConnThread.start();
         while (!asyncConnThread.wait(10)) {
-            const bool allowUserInput =
+            const bool allowUserInput = m_AssignedDisplayCount != 0 ||
                     m_WaitingForSessionCleanup.load() ||
                     m_WaitingForActiveSessionTakeoverDecision.load();
             QCoreApplication::processEvents(
@@ -3713,7 +4101,7 @@ void Session::execInternal()
     }
 
     // If the connection failed, clean up and abort the connection.
-    if (!m_AsyncConnectionSuccess) {
+    if (!m_AsyncConnectionSuccess || m_DisconnectRequested.load()) {
         delete m_InputHandler;
         m_InputHandler = nullptr;
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
@@ -3771,12 +4159,14 @@ void Session::execInternal()
 
     // We always want a resizable window with High DPI enabled
     Uint32 defaultWindowFlags = SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE;
-    if (createWaylandFullscreen && !presentationMappingDeferred) {
+    if (createWaylandFullscreen && !presentationMappingDeferred &&
+            !usesMacBorderlessPresentation()) {
         // Enter compositor-native fullscreen on the initial configure. This
         // prevents SDL from binding pointer input to an intermediate windowed
         // viewport before the fullscreen surface exists.
         defaultWindowFlags |= m_FullScreenFlag;
     }
+    if (usesMacBorderlessPresentation()) defaultWindowFlags |= SDL_WINDOW_HIDDEN;
     if (presentationMappingDeferred) {
         // Decoder selection can switch the SDL window between OpenGL and
         // Vulkan. SDL implements that switch by recreating the native Wayland
@@ -3851,7 +4241,7 @@ void Session::execInternal()
                                   flags);
             SDL_SetBooleanProperty(properties,
                                    SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN,
-                                   true);
+                                   !usesMacOutputPair());
             SDL_Window* secondary = SDL_CreateWindowWithProperties(properties);
             SDL_DestroyProperties(properties);
             if (secondary == nullptr) {
@@ -3873,10 +4263,11 @@ void Session::execInternal()
                             new DeferredSessionCleanupTask(this));
                 return;
             }
-            SDL_SetWindowFullscreenMode(secondary, nullptr);
-            SDL_SetWindowFullscreen(secondary, true);
-            if (!placeFullscreenWindowOnDisplay(secondary,
-                                                display.displayId)) {
+            if (!usesMacOutputPair()) {
+                SDL_SetWindowFullscreenMode(secondary, nullptr);
+                SDL_SetWindowFullscreen(secondary, true);
+            }
+            if (!usesMacOutputPair() && !placeFullscreenWindowOnDisplay(secondary, display.displayId)) {
                 SDL_DestroyWindow(secondary);
                 emit displayLaunchError(
                     tr("Unable to place the second fullscreen surface on its client monitor."));
@@ -3895,12 +4286,12 @@ void Session::execInternal()
             }
             m_SecondaryWindows.append(secondary);
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Created PLANK Wayland fullscreen surface for output %u",
+                        "Created PLANK presentation surface for output %u",
                         display.displayId);
         }
     }
 
-    if (!m_IsFullScreen) {
+    if (!m_IsFullScreen && !usesMacBorderlessPresentation()) {
         // Windowed means a normal compositor-managed desktop window. Do not
         // inherit a maximized launcher state that can make it indistinguishable
         // from borderless mode on Wayland.
@@ -3973,8 +4364,8 @@ void Session::execInternal()
     // for if/when we enter full-screen mode.
     updateOptimalWindowDisplayMode();
 
-    // Enter full screen if requested
-    if (m_IsFullScreen) {
+    // Enter full screen if requested; assigned Mac outputs use borderless placement.
+    if (m_IsFullScreen || usesMacBorderlessPresentation()) {
         if (presentationMappingDeferred) {
             // Keep the initial window normally sized and hidden through all
             // graphics-backend probes. Fullscreen is queued immediately before
@@ -3986,7 +4377,7 @@ void Session::execInternal()
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Deferring initial Wayland presentation map until decoder selection completes");
         } else {
-            setPresentationWindowsFullscreen(true);
+            setPresentationWindowsFullscreen(m_IsFullScreen);
         }
     }
 
@@ -4044,6 +4435,9 @@ void Session::execInternal()
             m_PlankToolbar.reset(new PlankToolbar(
                         m_Window, m_OverlayManager, *m_InputHandler,
                         *m_Preferences, m_PlankBitrateKbps));
+            if (usesMacBorderlessPresentation()) {
+                m_PlankToolbar->setPresentationFullscreen(m_PresentationFullscreen);
+            }
         }
     };
     if (!presentationMappingDeferred) {
@@ -4085,11 +4479,8 @@ void Session::execInternal()
             return true;
         case SDL_CODE_PLANK_CLIPBOARD:
 #ifdef Q_OS_MACOS
-            if (m_ClipboardSync != nullptr && userEvent.data1 != nullptr) {
-                const auto* payload =
-                        static_cast<const std::vector<std::uint8_t>*>(userEvent.data1);
-                m_ClipboardSync->applyHostTextOnMainThread(*payload);
-                delete payload;
+            if (m_ClipboardSync != nullptr) {
+                m_ClipboardSync->applyPendingHostTextOnMainThread();
             }
 #endif
             return true;
@@ -4117,8 +4508,53 @@ void Session::execInternal()
         }
     }
     SDL_Event event;
+    Uint64 nextPermissionCheck = 0;
     for (;;) {
+#ifdef Q_OS_MACOS
+#ifdef Q_OS_MACOS
+        if (m_ApplicationExitRequested.load()) goto DispatchDeferredCleanup;
+#endif
+        if (m_PenDisconnectRequested) goto DispatchDeferredCleanup;
+        if (m_KeyboardInputRejected) {
+            emit displayLaunchError(m_KeyboardPermissionFailure ?
+                tr("Keyboard capture is unavailable. Allow Accessibility and Input Monitoring for this client in System Settings, then reconnect.") :
+                tr("Keyboard capture stopped. The connection has closed to release held input. Reconnect after checking Mac input permissions."));
+            goto DispatchDeferredCleanup;
+        }
+#endif
+        if (m_DisconnectRequested.load()) goto DispatchDeferredCleanup;
+        if (!assignedWindowsCurrent()) {
+            emit displayLaunchError(tr("The selected display changed or became unavailable. Check your display before starting another session."));
+            goto DispatchDeferredCleanup;
+        }
+        if (m_PenInputRejected.load()) {
+            emit displayLaunchError(tr("The workstation could not accept pen input. "
+                                       "The connection has stopped to release any held input."));
+            goto DispatchDeferredCleanup;
+        }
+        if (m_VideoContractRejected.load()) {
+            emit displayLaunchError(tr("The stream changed its required hardware or video format. "
+                                       "Teraguchi has stopped the connection."));
+            goto DispatchDeferredCleanup;
+        }
         const Uint64 now = SDL_GetTicks();
+        if (m_AssignedDisplayCount && now >= nextPermissionCheck) {
+            nextPermissionCheck = now + 2000;
+            if (!m_StudioPermit || !m_StudioPermit->valid()) {
+                requestDisconnect();
+                emit displayLaunchError(tr("Studio setup has expired. The session has closed to release held input. Import a current setup file, then reconnect."));
+                goto DispatchDeferredCleanup;
+            }
+            if (!MacDisplayBinding::current(m_AssignedDisplays)) {
+                requestDisconnect();
+                emit displayLaunchError(tr("The selected displays changed. The session has closed to release held input. Check your displays, then reconnect."));
+                goto DispatchDeferredCleanup;
+            }
+            if (!MacInputAccess::query().ready()) {
+                emit displayLaunchError(tr("Mac input permissions changed. The session has closed to release held input. Check Accessibility and Input Monitoring, then reconnect."));
+                goto DispatchDeferredCleanup;
+            }
+        }
         const bool videoSilent = PlankHostRecovery::videoSilent(now, m_LastPlankVideoReceived.load());
         if (workerProbe != nullptr && workerProbe->isFinished()) {
             workerProbe->wait();
@@ -4154,7 +4590,8 @@ void Session::execInternal()
             m_PlankToolbar->setRenderedStats(
                         m_CurrentRenderedFps.load(std::memory_order_relaxed),
                         m_CurrentVideoMbps.load(std::memory_order_relaxed),
-                        currentVideoFecLoss().before);
+                        currentVideoFecLoss().before,
+                        currentNetworkRttMs());
             const auto action = m_PlankToolbar->update(
                         SDL_GetTicks(), !m_Reconnecting.load());
             if (action == PlankToolbar::Action::Disconnect) {
@@ -4209,10 +4646,33 @@ void Session::execInternal()
                         m_Preferences->plankUnreachableTimeoutSeconds);
             reconnectDecisionDeadline = 0;
         }
-        const int eventWaitTimeout = m_Reconnecting.load() ? 50 :
+        int eventWaitTimeout =
+#ifdef Q_OS_MACOS
+                m_InputHandler->hasPendingPenInput() ? 0 :
+#endif
+                m_Reconnecting.load() ? 50 :
                     (m_PlankToolbar ?
                          m_PlankToolbar->eventWaitTimeout() : 1000);
-        if (!SDL_WaitEventTimeout(&event, eventWaitTimeout)) {
+#ifdef Q_OS_MACOS
+        // Poll explicit application-exit state even when no SDL events arrive.
+        eventWaitTimeout = std::min(eventWaitTimeout, 50);
+#endif
+        const bool hasEvent = SDL_WaitEventTimeout(&event, eventWaitTimeout);
+#ifdef Q_OS_MACOS
+        const bool hideSystemUi = usesMacOutputPair() && m_Window && m_SecondaryWindows.size() == 1 &&
+            MacPresentationWindows::needsHiddenSystemUi(m_PresentationFullscreen,
+                SDL_GetWindowFlags(m_Window), SDL_GetWindowFlags(m_SecondaryWindows[0]));
+        if (!systemUi.setActive(hideSystemUi)) {
+            requestDisconnect();
+            emit displayLaunchError(tr("Unable to enter full screen on both displays."));
+            goto DispatchDeferredCleanup;
+        }
+#endif
+        if (!hasEvent) {
+#ifdef Q_OS_MACOS
+            if (m_KeyboardInputRejected) continue;
+            m_InputHandler->flushPenInput();
+#endif
             if (reconnectThread != nullptr &&
                     reconnectThread->isFinished() &&
                     !reconnectThread->completionPosted()) {
@@ -4224,6 +4684,58 @@ void Session::execInternal()
             }
         }
 
+#ifdef Q_OS_MACOS
+        if (m_ApplicationExitRequested.load()) goto DispatchDeferredCleanup;
+#endif
+        if (!assignedWindowsCurrent()) {
+            requestDisconnect();
+            emit displayLaunchError(tr("A presentation window left its selected display. The session has stopped."));
+            goto DispatchDeferredCleanup;
+        }
+        if (m_AssignedDisplayCount && event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
+                windowForEvent(event.window.windowID)) {
+            requestDisconnect();
+            goto DispatchDeferredCleanup;
+        }
+        if (usesMacOutputPair() && (event.type == SDL_EVENT_WINDOW_MINIMIZED ||
+                event.type == SDL_EVENT_WINDOW_RESTORED)) {
+            auto* source = windowForEvent(event.window.windowID);
+            if (source) {
+                const bool minimized = SDL_GetWindowFlags(source) & SDL_WINDOW_MINIMIZED;
+                if (minimized == (event.type == SDL_EVENT_WINDOW_MINIMIZED)) {
+                    for (auto* window : {m_Window, m_SecondaryWindows.value(0, nullptr)}) {
+                        if (window && bool(SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != minimized) {
+                            if (!(minimized ? SDL_MinimizeWindow(window) : SDL_RestoreWindow(window))) {
+                                requestDisconnect();
+                                emit displayLaunchError(tr("Unable to keep both presentation windows together. The session has stopped."));
+                                goto DispatchDeferredCleanup;
+                            }
+                        }
+                    }
+                    if (minimized) m_InputHandler->notifyFocusLost();
+                }
+            }
+        }
+        if (usesMacOutputPair() && event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED &&
+                windowForEvent(event.window.windowID)) {
+            SDL_Event resetEvent = {};
+            resetEvent.type = SDL_EVENT_RENDER_DEVICE_RESET;
+            SDL_PushEvent(&resetEvent);
+        }
+        if (m_AssignedDisplayCount && event.type >= SDL_EVENT_DISPLAY_FIRST && event.type <= SDL_EVENT_DISPLAY_LAST &&
+                !MacDisplayBinding::current(m_AssignedDisplays)) {
+            requestDisconnect();
+            emit displayLaunchError(tr("The selected displays changed. Start a new connection after checking them."));
+            goto DispatchDeferredCleanup;
+        }
+
+#ifdef Q_OS_MACOS
+        if (m_KeyboardInputRejected) continue;
+        m_InputHandler->beforePenEvent(event);
+        if (m_PenInputRejected.load() || m_PenDisconnectRequested) continue;
+        if (MacPenInput::isSyntheticMouse(event)) continue;
+        if (m_InputHandler->dispatchMacSystemKey(event)) continue;
+#endif
         const bool reconnectCompletion =
                 event.type == SDL_EVENT_USER &&
                 event.user.code == SDL_CODE_PLANK_REPLANK_COMPLETE;
@@ -4243,6 +4755,20 @@ void Session::execInternal()
             // transport worker retries. Never forward these events to a host
             // whose input connection has already stopped.
             switch (event.type) {
+#ifdef Q_OS_MACOS
+            case SDL_EVENT_PEN_PROXIMITY_IN:
+            case SDL_EVENT_PEN_PROXIMITY_OUT:
+            case SDL_EVENT_PEN_DOWN:
+            case SDL_EVENT_PEN_UP:
+            case SDL_EVENT_PEN_BUTTON_DOWN:
+            case SDL_EVENT_PEN_BUTTON_UP:
+            case SDL_EVENT_PEN_MOTION:
+            case SDL_EVENT_PEN_AXIS:
+                // Capture is disabled throughout reconnect. Keep completed
+                // pen samples available to local controls without forwarding.
+                m_InputHandler->handlePenEvent(event);
+                break;
+#endif
             case SDL_EVENT_MOUSE_MOTION:
                 if (m_PlankToolbar &&
                         event.motion.windowID == SDL_GetWindowID(m_Window)) {
@@ -4318,6 +4844,10 @@ void Session::execInternal()
                 break;
             }
             switch (event.user.code) {
+            case SDL_CODE_VIDEO_CONTRACT_REJECTED:
+                emit displayLaunchError(tr("The stream changed its required hardware or video format. "
+                                           "Teraguchi has stopped the connection."));
+                goto DispatchDeferredCleanup;
             case SDL_CODE_PLANK_RECONNECT:
                 if (reconnectThread != nullptr ||
                         !beginPlankReconnect(reconnectState)) {
@@ -4374,6 +4904,19 @@ void Session::execInternal()
             }
             break;
 
+#ifdef Q_OS_DARWIN
+        case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+        case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+            if (SDL_Window* window = windowForEvent(event.window.windowID)) {
+                MacWindow::logGeometry(window);
+                m_InputHandler->updateKeyboardGrabState();
+                if (m_PlankToolbar) {
+                    m_PlankToolbar->notifyWindowChanged();
+                }
+            }
+            break;
+#endif
+
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
         case SDL_EVENT_WINDOW_SHOWN:
         case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
@@ -4386,6 +4929,11 @@ void Session::execInternal()
             if (eventWindow == nullptr) {
                 break;
             }
+#ifdef Q_OS_DARWIN
+            if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+                MacWindow::logGeometry(eventWindow);
+            }
+#endif
             if (m_PlankToolbar && eventWindow == m_Window &&
                     event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
                 m_PlankToolbar->notifyWindowChanged();
@@ -4424,10 +4972,15 @@ void Session::execInternal()
                 needsFirstEnterCapture = false;
             }
 
-            // Secondary Vulkan swapchains resize themselves during the next
-            // frame. Only the primary window participates in decoder and
-            // toolbar lifecycle decisions.
+            // Vulkan secondaries resize themselves. Metal recreates the pair
+            // when either surface changes; toolbar ownership stays primary.
             if (eventWindow != m_Window) {
+                if (usesMacOutputPair() && (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+                        event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED || event.type == SDL_EVENT_WINDOW_SHOWN)) {
+                    SDL_Event resetEvent = {};
+                    resetEvent.type = SDL_EVENT_RENDER_DEVICE_RESET;
+                    SDL_PushEvent(&resetEvent);
+                }
                 break;
             }
 
@@ -4578,7 +5131,10 @@ void Session::execInternal()
                     SDL_UnlockSpinlock(&m_DecoderLock);
                     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                                  "Failed to recreate decoder after reset");
-                    emit displayLaunchError(tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
+                    emit displayLaunchError(TeraguchiVideo::Required ?
+                                tr("The required hardware video decoder is unavailable. "
+                                   "Teraguchi has stopped the connection instead of switching to software decoding.") :
+                                tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
                     goto DispatchDeferredCleanup;
                 }
 
@@ -4654,8 +5210,28 @@ void Session::execInternal()
             m_InputHandler->updatePointerRegionLock();
 
             SDL_UnlockSpinlock(&m_DecoderLock);
+            if (!m_PresentationReady && m_AssignmentWatch && !m_AssignmentWatch->permitsConnection()) {
+                emit displayLaunchError(tr("The workstation assignment needs a fresh check before opening the display."));
+                goto DispatchDeferredCleanup;
+            }
+            if (!m_PresentationReady && !m_DisconnectRequested.load()) {
+                m_PresentationReady = true;
+                emit presentationReady();
+            }
             break;
 
+#ifdef Q_OS_MACOS
+        case SDL_EVENT_PEN_PROXIMITY_IN:
+        case SDL_EVENT_PEN_PROXIMITY_OUT:
+        case SDL_EVENT_PEN_DOWN:
+        case SDL_EVENT_PEN_UP:
+        case SDL_EVENT_PEN_BUTTON_DOWN:
+        case SDL_EVENT_PEN_BUTTON_UP:
+        case SDL_EVENT_PEN_MOTION:
+        case SDL_EVENT_PEN_AXIS:
+            m_InputHandler->handlePenEvent(event);
+            break;
+#endif
         case SDL_EVENT_KEY_UP:
         case SDL_EVENT_KEY_DOWN:
             m_InputHandler->handleKeyEvent(&event.key);
@@ -4697,6 +5273,9 @@ void Session::execInternal()
                 // The ordinary input path batches queued motion for efficient
                 // transport. Aggregate it here when the toolbar is present so
                 // the toolbar tracker and host receive the identical delta.
+                // On Mac, keep mouse/pen/key events in queue order. Searching
+                // ahead for motion can otherwise move a sample across a key.
+#ifndef Q_OS_MACOS
                 if (event.motion.which != SDL_TOUCH_MOUSEID) {
                     SDL_Event nextMotionEvent;
                     while (SDL_PeepEvents(&nextMotionEvent, 1, SDL_GETEVENT,
@@ -4717,6 +5296,7 @@ void Session::execInternal()
                         }
                     }
                 }
+#endif
                 // The single-window toolbar observes the same authoritative
                 // coordinates, but motion always remains remote-desktop input.
                 // Only toolbar button and wheel events have exclusive local
@@ -4742,6 +5322,9 @@ void Session::execInternal()
     }
 
 DispatchDeferredCleanup:
+#ifdef Q_OS_MACOS
+    systemUi.setActive(false);
+#endif
     if (workerProbe != nullptr) {
         // The probe has a one-second HTTP deadline and owns no Session state.
         SDL_HideWindow(m_Window);

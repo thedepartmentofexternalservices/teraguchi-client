@@ -17,7 +17,13 @@
 class LinuxWacomInput;
 class LinuxRawWacomInput;
 #endif
-class PlankWaylandCursor;
+#include "streaming/planktabletcursor.h"
+#ifdef Q_OS_MACOS
+class MacQuitShortcut;
+class MacPenInput;
+class MacKeyboardState;
+class MacSystemKeys;
+#endif
 
 class SdlInputHandler
 {
@@ -32,11 +38,20 @@ public:
 
     void setStreamDimensions(int streamWidth, int streamHeight);
 
+    void setPresentationFullscreen(bool fullscreen) { m_PresentationFullscreen = fullscreen; }
     void setPresentationLayout(const PlankPresentationLayout& layout);
 
-    void refreshWaylandTabletCursorParents();
+    void refreshTabletCursorParents();
 
     void handleKeyEvent(SDL_KeyboardEvent* event);
+
+#ifdef Q_OS_MACOS
+    void beforePenEvent(const SDL_Event& event);
+    void handlePenEvent(const SDL_Event& event);
+    void flushPenInput();
+    bool hasPendingPenInput() const;
+    bool dispatchMacSystemKey(const SDL_Event& event);
+#endif
 
     void handleMouseButtonEvent(SDL_MouseButtonEvent* event);
 
@@ -92,6 +107,16 @@ public:
     void updatePointerRegionLock();
 
 private:
+#ifdef Q_OS_MACOS
+    void initializeMacPen();
+    void initializeMacKeyboard();
+    SDL_WindowID focusedKeyboardWindow() const;
+    std::unique_ptr<MacPenInput> m_MacPenInput;
+    std::unique_ptr<MacKeyboardState> m_MacKeyboard;
+    std::unique_ptr<MacSystemKeys> m_MacSystemKeys;
+    bool m_PenToolbarActive = false;
+    std::unique_ptr<MacQuitShortcut> m_MacQuitShortcut;
+#endif
     enum KeyCombo {
         KeyComboQuit,
         KeyComboUngrabInput,
@@ -106,6 +131,7 @@ private:
 
     void performSpecialKeyCombo(KeyCombo combo);
 
+    bool m_PresentationFullscreen = false;
     SDL_Window* m_Window;
     PlankPresentationLayout m_PresentationLayout;
     bool m_NeedsManualCaptureOnLeave;
@@ -119,6 +145,17 @@ private:
     bool m_RemoteCursorVisible;
     bool m_CompositorCursorRequestedVisible;
     bool m_TabletCursorActive;
+#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
+    // Explicit diagnostic builds only. Bounded to 15 seconds after first pen
+    // forwarding, at most ten position records/second. Never records keys.
+    Uint64 m_PenTraceStart = 0, m_PenTraceLast = 0;
+    unsigned m_PenTracePackets = 0, m_PenTraceMouseEvents = 0;
+    float m_PenTraceX = 0, m_PenTraceY = 0;
+    float m_PenTraceMouseX = 0, m_PenTraceMouseY = 0;
+    Uint32 m_PenTraceMouseId = 0;
+    unsigned m_PenTraceAction = 0, m_PenTraceMouseButtons = 0;
+    void tracePenCursor(const char* trigger);
+#endif
 
     QSet<short> m_KeysDown;
     bool m_FakeMouseCaptureActive;
@@ -165,17 +202,17 @@ private:
     bool m_AppliedRemoteCursorPositionValid = false;
     std::atomic_bool m_RemoteCursorPositionUpdatePending {false};
     std::atomic_bool m_TabletCursorActivationPending {false};
-    struct WaylandTabletCursorOutput {
+    struct TabletCursorOutput {
         SDL_Window* window = nullptr;
-        std::unique_ptr<PlankWaylandCursor> cursor;
+        std::unique_ptr<PlankTabletCursor> cursor;
     };
-    std::vector<WaylandTabletCursorOutput> m_WaylandTabletCursorOutputs;
+    std::vector<TabletCursorOutput> m_TabletCursorOutputs;
 
     void setCursorVisible(bool visible);
     void activateCompositorCursor();
-    PlankWaylandCursor* ensureWaylandTabletCursorAttached(
+    PlankTabletCursor* ensureTabletCursorAttached(
         SDL_Window* targetWindow);
-    void reconcileWaylandTabletCursorOutputs();
+    void reconcileTabletCursorOutputs();
     bool mapRemoteCursorPositionToWindow(const RemoteCursorPosition& position,
                                          SDL_Window*& window,
                                          int& x, int& y) const;

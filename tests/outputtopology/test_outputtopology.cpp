@@ -1,6 +1,7 @@
 #include <QtTest>
 
 #include "outputtopology.h"
+#include "../../app/streaming/macdisplaygeometry.h"
 
 class TestOutputTopology : public QObject
 {
@@ -11,6 +12,7 @@ private slots:
     void roundTripsQualificationVector();
     void rejectsDuplicateIdentity();
     void rejectsConfiguredModeMismatch();
+    void reportsHeadlessHostWithoutOutputs();
     void acceptsTallCinemaModes();
     void enforcesHostDisplayPolicy();
     void validatesRequestedLayoutGeometry();
@@ -22,8 +24,52 @@ private slots:
     void recognizesDescriptionCapabilities();
     void matchesMacClientCanvas();
     void matchesRetinaClientCanvas();
+    void matchesMacFullscreenViewport();
     void buildsMacDisplayRequest();
 };
+
+void TestOutputTopology::reportsHeadlessHostWithoutOutputs()
+{
+    QFile file(QString::fromUtf8(qgetenv("PLANK_REPO_ROOT")) + "/tests/protocol/output-topology-v13.json");
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto fixture = QJsonDocument::fromJson(file.readAll()).object();
+    NvOutputTopology topology;
+    QVERIFY(NvOutputTopology::fromJson(fixture, topology));
+    const auto before = topology.toJson();
+    auto empty = fixture;
+    auto layout = empty["layout"].toObject();
+    layout["kind"] = "physical";
+    layout["virtual"] = false;
+    layout["virtual_modes"] = QJsonArray();
+    layout["output_count"] = 0;
+    empty["layout"] = layout;
+    empty["outputs"] = QJsonArray();
+    empty["desktop"] = QJsonObject{{"x", 0}, {"y", 0}, {"width", 0}, {"height", 0}};
+    QString error;
+    QVERIFY(!NvOutputTopology::fromJson(empty, topology, &error));
+    QCOMPARE(error, QStringLiteral("Host reported no connected outputs"));
+    QCOMPARE(topology.toJson(), before); // A diagnostic must never accept or replace topology.
+}
+
+void TestOutputTopology::matchesMacFullscreenViewport()
+{
+    for (int inset : {0, 24, 34, 38}) {
+        int logicalHeight = 1107;
+        int pixelHeight = 2214;
+        QVERIFY(MacDisplayGeometry::insetTop(1710, logicalHeight, 3420, pixelHeight, inset));
+        int scale = 0;
+        QString error;
+        const QVector<NvClientDisplay> displays = {{QRect(-1710, inset, 1710, logicalHeight),
+            QSize(3420, pixelHeight), QSize(3420, pixelHeight)}};
+        QCOMPARE(NvOutputTopology::resolveMacClientDisplayMode(displays, &error, &scale),
+                 QStringLiteral("3420x%1").arg(pixelHeight));
+        QCOMPARE(scale, 2);
+        QVERIFY(error.isEmpty());
+        const auto request = NvOutputTopology::macDisplayRequest(
+            QStringLiteral("3420x%1").arg(pixelHeight), "hevc-10-444-videotoolbox", scale);
+        QVERIFY(!request.isEmpty());
+    }
+}
 
 void TestOutputTopology::buildsMacDisplayRequest()
 {

@@ -2,6 +2,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <cstdint>
 #include <memory>
 #include <QString>
 
@@ -34,7 +35,10 @@ public:
                           int initialBitrateKbps);
     ~PlankToolbar();
 
-    void setRenderedStats(float fps, float videoMbps, float packetLossPercent);
+    void setRenderedStats(float fps,
+                          float videoMbps,
+                          float packetLossPercent,
+                          std::uint32_t networkRttMs = 0);
     void setAppliedBitrate(int requestedKbps, int appliedKbps, int peakKbps);
     Action update(Uint64 now, bool transportAvailable = true);
     void showReconnectPrompt(int unreachableSeconds);
@@ -49,6 +53,8 @@ public:
     bool handleMouseWheel(const SDL_MouseWheelEvent& event);
 
     int eventWaitTimeout() const;
+
+    void setPresentationFullscreen(bool fullscreen) { m_PresentationFullscreen = fullscreen; notifyWindowChanged(); }
 
 private:
     enum class Control {
@@ -96,6 +102,7 @@ private:
     int sliderLeft() const;
     int sliderRight() const;
 
+    bool m_PresentationFullscreen = false;
     SDL_Window* m_Window;
     Overlay::OverlayManager& m_OverlayManager;
     SdlInputHandler& m_InputHandler;
@@ -139,9 +146,11 @@ private:
     float m_RenderedFps;
     float m_VideoMbps;
     float m_PacketLossPercent;
+    std::uint32_t m_NetworkRttMs;
     float m_LastDrawnFps;
     float m_LastDrawnVideoMbps;
     float m_LastDrawnPacketLossPercent;
+    std::uint32_t m_LastDrawnNetworkRttMs;
     Uint64 m_HideDeadline;
     Uint64 m_LastBitrateSendTime;
     Uint64 m_LastBitrateChangeTime;

@@ -7,6 +7,9 @@
 
 void SdlInputHandler::handleMouseButtonEvent(SDL_MouseButtonEvent* event)
 {
+#ifdef Q_OS_MACOS
+    if (event->which == SDL_PEN_MOUSEID) return;
+#endif
     int button;
     SDL_Window* window = presentationWindow(event->windowID);
     if (window == nullptr) {
@@ -18,6 +21,14 @@ void SdlInputHandler::handleMouseButtonEvent(SDL_MouseButtonEvent* event)
         return;
     }
     activateCompositorCursor();
+#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
+    if (isCaptureActive()) {
+        ++m_PenTraceMouseButtons;
+        m_PenTraceMouseId = event->which;
+        m_PenTraceMouseX = event->x; m_PenTraceMouseY = event->y;
+        tracePenCursor("mouse-button");
+    }
+#endif
     if (!isCaptureActive()) {
         if (event->button == SDL_BUTTON_LEFT && !event->down &&
                 isMouseInVideoRegion(event->x, event->y,
@@ -80,6 +91,10 @@ void SdlInputHandler::handleMouseButtonEvent(SDL_MouseButtonEvent* event)
 void SdlInputHandler::handleMouseMotionEvent(SDL_MouseMotionEvent* event,
                                              bool batchPendingEvents)
 {
+#ifdef Q_OS_MACOS
+    if (event->which == SDL_PEN_MOUSEID) return;
+    batchPendingEvents = false;
+#endif
     if (!isCaptureActive()) {
         // Not capturing
         return;
@@ -88,7 +103,15 @@ void SdlInputHandler::handleMouseMotionEvent(SDL_MouseMotionEvent* event,
         // Ignore synthetic mouse events
         return;
     }
+#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
+    ++m_PenTraceMouseEvents;
+    m_PenTraceMouseId = event->which;
+    m_PenTraceMouseX = event->x; m_PenTraceMouseY = event->y;
+#endif
     activateCompositorCursor();
+#ifdef PLANK_PEN_CURSOR_DIAGNOSTICS
+    tracePenCursor("mouse-motion");
+#endif
 
     SDL_Window* window = presentationWindow(event->windowID);
     if (window == nullptr) {
@@ -192,6 +215,9 @@ bool SdlInputHandler::sendAbsoluteMousePosition(
 
 void SdlInputHandler::handleMouseWheelEvent(SDL_MouseWheelEvent* event)
 {
+#ifdef Q_OS_MACOS
+    if (event->which == SDL_PEN_MOUSEID) return;
+#endif
     if (!isCaptureActive()) {
         // Not capturing
         return;

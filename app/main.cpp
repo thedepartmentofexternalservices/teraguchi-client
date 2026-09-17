@@ -1,3 +1,7 @@
+#include "backend/teraguchi/tailscaleworkstations.h"
+#include "backend/teraguchi/macinputpermissions.h"
+#include "backend/teraguchi/macstartuparguments.h"
+#include "backend/teraguchi/supportdiagnostics.h"
 #include <QGuiApplication>
 #include <QStyleHints>
 #include <QQmlApplicationEngine>
@@ -29,7 +33,7 @@
 #include <SDL3/SDL_main.h>
 
 #ifdef Q_OS_MACOS
-#include "macquitbridge.h"
+#include "macapplication.h"
 #endif
 
 #ifdef HAVE_FFMPEG
@@ -359,6 +363,9 @@ int SDLCALL signalHandlerThread(void* data)
             event.type = SDL_EVENT_QUIT;
             event.quit.timestamp = SDL_GetTicksNS();
             SDL_PushEvent(&event);
+            // SDL owns the loop while streaming; Qt owns it while idle.
+            // Queue application exit too, so both paths finish normal cleanup.
+            QMetaObject::invokeMethod(QCoreApplication::instance(), "quit", Qt::QueuedConnection);
             requestedQuit = true;
             break;
         }
@@ -754,10 +761,10 @@ int main(int argc, char *argv[])
         SDL_SetHint("SDL_VIDEO_WAYLAND_MODE_SCALING", "aspect");
     }
 
-    QGuiApplication app(argc, argv);
-
 #ifdef Q_OS_MACOS
-    MacQuitBridge macQuitBridge(app);
+    MacApplication app(argc, argv);
+#else
+    QGuiApplication app(argc, argv);
 #endif
 
 #ifdef Q_OS_MACOS
@@ -823,7 +830,13 @@ int main(int argc, char *argv[])
 #endif
 
     GlobalCommandLineParser parser;
-    GlobalCommandLineParser::ParseResult commandLineParserResult = parser.parse(app.arguments());
+    GlobalCommandLineParser::ParseResult commandLineParserResult = parser.parse(TeraguchiStartup::arguments(app.arguments()));
+    const bool workstationMode = commandLineParserResult == GlobalCommandLineParser::WorkstationsRequested;
+    if (workstationMode) {
+        // A separate local settings namespace protects installed PLANK bookmarks.
+        QCoreApplication::setApplicationName("Teraguchi Development");
+        StreamingPreferences::get()->enableMdns = false;
+    }
     const int compileVersion = SDL_VERSION;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Compiled with SDL %d.%d.%d",
@@ -910,6 +923,9 @@ int main(int argc, char *argv[])
     app.setDesktopFileName("la.instinctual.Plank.Client");
 
     // Register our C++ types for QML
+    qmlRegisterType<MacInputPermissions>("MacInputPermissions", 1, 0, "MacInputPermissions");
+    qmlRegisterType<SupportDiagnostics>("SupportDiagnostics", 1, 0, "SupportDiagnostics");
+    qmlRegisterType<TailscaleWorkstations>("TailscaleWorkstations", 1, 0, "TailscaleWorkstations");
     qmlRegisterType<ComputerModel>("ComputerModel", 1, 0, "ComputerModel");
     qmlRegisterUncreatableType<Session>("Session", 1, 0, "Session", "Session cannot be created from QML");
     qmlRegisterSingletonType<ComputerManager>("ComputerManager", 1, 0,
@@ -929,7 +945,7 @@ int main(int argc, char *argv[])
                                                    });
 
     // We require the Material theme
-    QQuickStyle::setStyle("Material");
+    QQuickStyle::setStyle(workstationMode ? "macOS" : "Material");
 
     // Our icons are styled for a dark theme, so we do not allow the user to override this
     qputenv("QT_QUICK_CONTROLS_MATERIAL_THEME", "Dark");
@@ -945,9 +961,20 @@ int main(int argc, char *argv[])
         qputenv("QT_QUICK_CONTROLS_MATERIAL_PRIMARY", "#393D43");
     }
 
+    auto* studioSetup = workstationMode ? new StudioSetup(&app) : nullptr;
+    if (studioSetup) {
+        if (!parser.studioDnsSuffix().isEmpty()) studioSetup->setDevelopmentSuffix(parser.studioDnsSuffix());
+        if (!parser.studioConfigPath().isEmpty() && !studioSetup->importFile(QUrl::fromLocalFile(parser.studioConfigPath()))) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Studio setup import failed; no workstation connection started");
+            return EXIT_FAILURE;
+        }
+    }
     QQmlApplicationEngine engine;
     QString initialView;
     switch (commandLineParserResult) {
+    case GlobalCommandLineParser::WorkstationsRequested:
+        engine.rootContext()->setContextProperty("studioSetupService", studioSetup);
+        break;
     case GlobalCommandLineParser::NormalStartRequested:
         initialView = "qrc:/gui/PcView.qml";
         break;
@@ -976,10 +1003,12 @@ int main(int argc, char *argv[])
                 commandLineParserResult == GlobalCommandLineParser::NormalStartRequested);
 
     // Load the main.qml file
-    engine.load(QUrl(QStringLiteral("qrc:/gui/main.qml")));
+    engine.load(QUrl(workstationMode ? QStringLiteral("qrc:/gui/teraguchi/WorkstationWindow.qml") : QStringLiteral("qrc:/gui/main.qml")));
     if (engine.rootObjects().isEmpty()) {
         return -1;
     }
+
+    if (workstationMode) qInfo() << "Teraguchi development picker loaded";
 
     int err = app.exec();
 

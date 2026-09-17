@@ -23,14 +23,29 @@ extern "C" {
 }
 
 #include "vt_colors.h"
+#include "vt_presentation.h"
+#include <memory>
 
-struct Vertex
-{
-    vector_float4 position;
-    vector_float2 texCoord;
-};
+using Vertex = PlankVT::Vertex;
 
 #define MAX_VIDEO_PLANES 3
+
+// Presented handlers can outlive renderer teardown. Own their synchronization
+// separately so late callbacks never dereference a destroyed renderer.
+struct VTPresentationState {
+    SDL_Mutex* mutex = SDL_CreateMutex();
+    SDL_Condition* condition = SDL_CreateCondition();
+    int pending = 0;
+    ~VTPresentationState() {
+        if (condition) SDL_DestroyCondition(condition);
+        if (mutex) SDL_DestroyMutex(mutex);
+    }
+};
+
+struct VTFrameTextures {
+    std::array<CVMetalTextureRef, MAX_VIDEO_PLANES> planes{};
+    ~VTFrameTextures() { for (auto texture : planes) if (texture) CFRelease(texture); }
+};
 
 class VTMetalRenderer : public VTBaseRenderer
 {
@@ -58,21 +73,14 @@ public:
           m_LastFrameHeight(-1),
           m_LastDrawableWidth(-1),
           m_LastDrawableHeight(-1),
-          m_PresentationMutex(SDL_CreateMutex()),
-          m_PresentationCond(SDL_CreateCondition()),
-          m_PendingPresentationCount(0)
+          m_PresentationState(std::make_shared<VTPresentationState>())
     {
     }
 
     virtual ~VTMetalRenderer() override
     { @autoreleasepool {
-        if (m_PresentationCond != nullptr) {
-            SDL_DestroyCondition(m_PresentationCond);
-        }
-
-        if (m_PresentationMutex != nullptr) {
-            SDL_DestroyMutex(m_PresentationMutex);
-        }
+        cleanupRenderContext();
+        m_Secondary.reset();
 
         if (m_HwContext != nullptr) {
             av_buffer_unref(&m_HwContext);
@@ -134,6 +142,12 @@ public:
     }}
 
     virtual void waitToRender() override
+    {
+        waitForOutput();
+        if (m_Secondary) m_Secondary->waitForOutput();
+    }
+
+    void waitForOutput()
     { @autoreleasepool {
         if (!m_NextDrawable) {
             // Wait for the next available drawable before latching the frame to render
@@ -144,14 +158,14 @@ public:
 
             if (m_MetalLayer.displaySyncEnabled) {
                 // Pace ourselves by waiting if too many frames are pending presentation
-                SDL_LockMutex(m_PresentationMutex);
-                if (m_PendingPresentationCount > 2) {
-                    if (!SDL_WaitConditionTimeout(m_PresentationCond, m_PresentationMutex, 100)) {
+                SDL_LockMutex(m_PresentationState->mutex);
+                if (m_PresentationState->pending > 2) {
+                    if (!SDL_WaitConditionTimeout(m_PresentationState->condition, m_PresentationState->mutex, 100)) {
                         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                                     "Presentation wait timed out after 100 ms");
                     }
                 }
-                SDL_UnlockMutex(m_PresentationMutex);
+                SDL_UnlockMutex(m_PresentationState->mutex);
             }
         }
     }}
@@ -160,6 +174,7 @@ public:
     {
         // Free any unused drawable
         discardNextDrawable();
+        if (m_Secondary) m_Secondary->discardNextDrawable();
     }
 
     bool updateVideoRegionSizeForFrame(AVFrame* frame)
@@ -176,31 +191,15 @@ public:
             return true;
         }
 
-        // Determine the correct scaled size for the video region
-        SDL_Rect src, dst;
-        src.x = src.y = 0;
-        src.w = frame->width;
-        src.h = frame->height;
-        dst.x = dst.y = 0;
-        dst.w = drawableWidth;
-        dst.h = drawableHeight;
-        StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
-
-        // Convert screen space to normalized device coordinates
-        SDL_FRect renderRect;
-        StreamUtils::screenSpaceToNormalizedDeviceCoords(&dst, &renderRect, drawableWidth, drawableHeight);
-
-        Vertex verts[] =
-        {
-            { { renderRect.x, renderRect.y, 0.0f, 1.0f }, { 0.0f, 1.0f } },
-            { { renderRect.x, renderRect.y+renderRect.h, 0.0f, 1.0f }, { 0.0f, 0} },
-            { { renderRect.x+renderRect.w, renderRect.y, 0.0f, 1.0f }, { 1.0f, 1.0f} },
-            { { renderRect.x+renderRect.w, renderRect.y+renderRect.h, 0.0f, 1.0f }, { 1.0f, 0} },
-        };
+        const QSize canvas = m_CanvasSize.isEmpty() ? QSize(drawableWidth, drawableHeight) : m_CanvasSize;
+        const QRect output = m_OutputRect.isEmpty() ? QRect(QPoint(0, 0), canvas) : m_OutputRect;
+        const auto quad = PlankVT::outputQuad(QSize(frame->width, frame->height), canvas, output);
+        m_VideoVisible = quad.visible;
+        const auto verts = PlankVT::vertices(quad);
 
         [m_VideoVertexBuffer release];
         auto bufferOptions = MTLCPUCacheModeWriteCombined | MTLResourceStorageModeManaged;
-        m_VideoVertexBuffer = [m_MetalLayer.device newBufferWithBytes:verts length:sizeof(verts) options:bufferOptions];
+        m_VideoVertexBuffer = [m_MetalLayer.device newBufferWithBytes:verts.data() length:sizeof(verts) options:bufferOptions];
         if (!m_VideoVertexBuffer) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "Failed to create video vertex buffer");
@@ -374,35 +373,65 @@ public:
         return m_SwMappingTextures[planeIndex];
     }
 
-    // Caller frees frame after we return
-    virtual void renderFrame(AVFrame* frame) override
+    void requestRenderReset()
+    {
+        cleanupRenderContext();
+        SDL_Event event{};
+        event.type = SDL_EVENT_RENDER_DEVICE_RESET;
+        SDL_PushEvent(&event);
+    }
+
+    bool prepareOutputFrame(AVFrame* frame)
+    {
+        return updateColorSpaceForFrame(frame) && updateVideoRegionSizeForFrame(frame);
+    }
+
+    bool testRenderFrame(AVFrame* frame) override
+    {
+        // Build both pipelines from the exact-profile decoded test frame. This
+        // validates resource creation, not physical presentation or its timing.
+        return prepareOutputFrame(frame) &&
+                (!m_Secondary || m_Secondary->prepareOutputFrame(frame));
+    }
+
+    // One decoded frame feeds both outputs. Prepare and encode both before
+    // committing either; a missing target never presents the full canvas on one.
+    void renderFrame(AVFrame* frame) override
     { @autoreleasepool {
-        // Handle changes to the frame's colorspace from last time we rendered
-        if (!updateColorSpaceForFrame(frame)) {
-            // Trigger the main thread to recreate the decoder
-            SDL_Event event;
-            event.type = SDL_EVENT_RENDER_DEVICE_RESET;
-            SDL_PushEvent(&event);
+        if (!prepareOutputFrame(frame) ||
+                (m_Secondary && !m_Secondary->prepareOutputFrame(frame))) {
+            requestRenderReset();
             return;
         }
-
-        // Handle changes to the video size or drawable size
-        if (!updateVideoRegionSizeForFrame(frame)) {
-            // Trigger the main thread to recreate the decoder
-            SDL_Event event;
-            event.type = SDL_EVENT_RENDER_DEVICE_RESET;
-            SDL_PushEvent(&event);
+        waitToRender(); // Color/pixel-format changes may discard an old drawable.
+        if (!m_NextDrawable || (m_Secondary && !m_Secondary->m_NextDrawable)) {
+            cleanupRenderContext();
             return;
         }
-
-        // Don't proceed with rendering if we don't have a drawable
-        if (m_NextDrawable == nullptr) {
+        auto primaryCommand = encodeOutputFrame(frame);
+        auto secondaryCommand = m_Secondary ? m_Secondary->encodeOutputFrame(frame) : nil;
+        if (!primaryCommand || (m_Secondary && !secondaryCommand)) {
+            [primaryCommand release];
+            [secondaryCommand release];
+            requestRenderReset();
             return;
         }
+        submitOutputCommand(primaryCommand);
+        if (m_Secondary) m_Secondary->submitOutputCommand(secondaryCommand);
+        [primaryCommand waitUntilCompleted];
+        [secondaryCommand waitUntilCompleted];
+        const bool failed = primaryCommand.status == MTLCommandBufferStatusError ||
+                (secondaryCommand && secondaryCommand.status == MTLCommandBufferStatusError);
+        [primaryCommand release];
+        [secondaryCommand release];
+        if (failed) requestRenderReset();
+    }}
 
-        std::array<CVMetalTextureRef, MAX_VIDEO_PLANES> cvMetalTextures;
+    id<MTLCommandBuffer> encodeOutputFrame(AVFrame* frame)
+    {
+        auto textures = std::make_shared<VTFrameTextures>();
         size_t planes = getFramePlaneCount(frame);
-        SDL_assert(planes <= MAX_VIDEO_PLANES);
+        if (planes < 2 || planes > MAX_VIDEO_PLANES) return nil;
 
         if (frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
             CVPixelBufferRef pixBuf = reinterpret_cast<CVPixelBufferRef>(frame->data[3]);
@@ -434,19 +463,19 @@ public:
                     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                                  "Unknown pixel format: %x",
                                  CVPixelBufferGetPixelFormatType(pixBuf));
-                    return;
+                    return nil;
                 }
 
                 CVReturn err = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, m_TextureCache, pixBuf, nullptr, fmt,
                                                                          CVPixelBufferGetWidthOfPlane(pixBuf, i),
                                                                          CVPixelBufferGetHeightOfPlane(pixBuf, i),
                                                                          i,
-                                                                         &cvMetalTextures[i]);
+                                                                         &textures->planes[i]);
                 if (err != kCVReturnSuccess) {
                     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                                  "CVMetalTextureCacheCreateTextureFromImage() failed: %d",
                                  err);
-                    return;
+                    return nil;
                 }
             }
         }
@@ -459,28 +488,31 @@ public:
         renderPassDescriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
         auto commandBuffer = [m_CommandQueue commandBuffer];
         auto renderEncoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
+        if (!commandBuffer || !renderEncoder) return nil;
 
         // Bind textures and buffers then draw the video region
         [renderEncoder setRenderPipelineState:m_VideoPipelineState];
         if (frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
             for (size_t i = 0; i < planes; i++) {
-                [renderEncoder setFragmentTexture:CVMetalTextureGetTexture(cvMetalTextures[i]) atIndex:i];
+                [renderEncoder setFragmentTexture:CVMetalTextureGetTexture(textures->planes[i]) atIndex:i];
             }
             [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
-                // Free textures after completion of rendering per CVMetalTextureCache requirements
-                for (size_t i = 0; i < planes; i++) {
-                    CFRelease(cvMetalTextures[i]);
-                }
+                // Captured ownership also releases textures if an uncommitted
+                // command is discarded because the other output failed.
+                (void)textures;
             }];
         }
         else {
             for (size_t i = 0; i < planes; i++) {
-                [renderEncoder setFragmentTexture:mapPlaneForSoftwareFrame(frame, i) atIndex:i];
+                auto texture = mapPlaneForSoftwareFrame(frame, i);
+                if (!texture) { [renderEncoder endEncoding]; return nil; }
+                [renderEncoder setFragmentTexture:texture atIndex:i];
             }
         }
         [renderEncoder setFragmentBuffer:m_CscParamsBuffer offset:0 atIndex:0];
         [renderEncoder setVertexBuffer:m_VideoVertexBuffer offset:0 atIndex:0];
-        [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        if (m_VideoVisible)
+            [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 
         // Now draw any overlays that are enabled
         for (int i = 0; i < Overlay::OverlayMax; i++) {
@@ -534,29 +566,27 @@ public:
 
         [renderEncoder endEncoding];
 
+        return [commandBuffer retain];
+    }
+
+    void submitOutputCommand(id<MTLCommandBuffer> commandBuffer)
+    {
         if (m_MetalLayer.displaySyncEnabled) {
-            // Queue a completion callback on the drawable to pace our rendering
-            SDL_LockMutex(m_PresentationMutex);
-            m_PendingPresentationCount++;
-            SDL_UnlockMutex(m_PresentationMutex);
+            auto state = m_PresentationState;
+            SDL_LockMutex(state->mutex);
+            state->pending++;
+            SDL_UnlockMutex(state->mutex);
             [m_NextDrawable addPresentedHandler:^(id<MTLDrawable>) {
-                SDL_LockMutex(m_PresentationMutex);
-                m_PendingPresentationCount--;
-                SDL_SignalCondition(m_PresentationCond);
-                SDL_UnlockMutex(m_PresentationMutex);
+                SDL_LockMutex(state->mutex);
+                state->pending--;
+                SDL_SignalCondition(state->condition);
+                SDL_UnlockMutex(state->mutex);
             }];
         }
-
-        // Flip to the newly rendered buffer
         [commandBuffer presentDrawable:m_NextDrawable];
         [commandBuffer commit];
-
-        // Wait for the command buffer to complete and free our CVMetalTextureCache references
-        [commandBuffer waitUntilCompleted];
-
-        [m_NextDrawable release];
-        m_NextDrawable = nullptr;
-    }}
+        discardNextDrawable();
+    }
 
     id<MTLDevice> getMetalDevice() {
         if (qgetenv("VT_FORCE_METAL") == "0") {
@@ -595,7 +625,38 @@ public:
         return nullptr;
     }
 
-    virtual bool initialize(PDECODER_PARAMETERS params) override
+    bool initialize(PDECODER_PARAMETERS params) override
+    {
+        if (!params || !params->window) return false;
+        if (params->presentationLayout &&
+                !PlankVT::validLayout(*params->presentationLayout, params->window)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Invalid Metal presentation layout");
+            return false;
+        }
+        const auto* layout = params->presentationLayout;
+        const bool multi = layout && layout->isMultiOutput();
+        const PlankPresentationOutput* secondary = nullptr;
+        if (multi) {
+            m_CanvasSize = layout->canvasSize;
+            for (const auto& output : layout->outputs) {
+                if (output.window == params->window) m_OutputRect = output.canvasRect;
+                else secondary = &output;
+            }
+        }
+        if (!initializeOutput(params, true)) return false;
+        if (multi) {
+            m_Secondary = std::make_unique<VTMetalRenderer>(m_HwAccel);
+            m_Secondary->m_CanvasSize = layout->canvasSize;
+            m_Secondary->m_OutputRect = secondary->canvasRect;
+            auto secondaryParams = *params;
+            secondaryParams.window = secondary->window;
+            secondaryParams.presentationLayout = nullptr;
+            if (!m_Secondary->initializeOutput(&secondaryParams, false)) return false;
+        }
+        return true;
+    }
+
+    bool initializeOutput(PDECODER_PARAMETERS params, bool ownsDecoder)
     { @autoreleasepool {
         int err;
 
@@ -610,20 +671,20 @@ public:
                     "Selected Metal device: %s",
                     device.name.UTF8String);
 
-        if (m_HwAccel && !checkDecoderCapabilities(device, params)) {
+        if (!m_PresentationState->mutex || !m_PresentationState->condition) return false;
+        if (ownsDecoder && m_HwAccel && !checkDecoderCapabilities(device, params)) {
             return false;
         }
 
-        err = av_hwdevice_ctx_create(&m_HwContext,
-                                     AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
-                                     nullptr,
-                                     nullptr,
-                                     0);
-        if (err < 0) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "av_hwdevice_ctx_create() failed for VT decoder: %d",
-                        err);
-            return false;
+        if (ownsDecoder) {
+            err = av_hwdevice_ctx_create(&m_HwContext,
+                                         AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                                         nullptr, nullptr, 0);
+            if (err < 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "av_hwdevice_ctx_create() failed for VT decoder: %d", err);
+                return false;
+            }
         }
 
         m_MetalView = SDL_Metal_CreateView(m_Window);
@@ -635,6 +696,7 @@ public:
         }
 
         m_MetalLayer = (CAMetalLayer*)SDL_Metal_GetLayer(m_MetalView);
+        if (!m_MetalLayer) return false;
 
         // Choose a device
         m_MetalLayer.device = device;
@@ -681,7 +743,7 @@ public:
 
         // Create a command queue for submission
         m_CommandQueue = [m_MetalLayer.device newCommandQueue];
-        return true;
+        return m_CommandQueue != nil;
     }}
 
     virtual void notifyOverlayUpdated(Overlay::OverlayType type) override
@@ -806,6 +868,9 @@ public:
 
     bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info) override
     {
+        // Multi-output views own a fixed Session layout snapshot. Recreate them
+        // together after window changes instead of retaining a stale crop/target.
+        if (m_Secondary) return false;
         auto unhandledStateFlags = info->stateChangeFlags;
 
         // We can always handle size changes
@@ -841,9 +906,11 @@ private:
     int m_LastFrameHeight;
     int m_LastDrawableWidth;
     int m_LastDrawableHeight;
-    SDL_Mutex* m_PresentationMutex;
-    SDL_Condition* m_PresentationCond;
-    int m_PendingPresentationCount;
+    std::shared_ptr<VTPresentationState> m_PresentationState;
+    std::unique_ptr<VTMetalRenderer> m_Secondary;
+    QSize m_CanvasSize;
+    QRect m_OutputRect;
+    bool m_VideoVisible = false;
 };
 
 IFFmpegRenderer* VTMetalRendererFactory::createRenderer(bool hwAccel) {

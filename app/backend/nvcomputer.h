@@ -116,6 +116,8 @@ public:
     int plankHostMetadataVersion = 0;
     QString plankHostVersion;
     QString sessionToken;
+    // Assigned-session-only certificate trust. Never loaded/saved in settings.
+    TeraguchiStudio::HostLease assignedHostTrust;
     int plankTopologyVersion = 0;
     int plankFeatureFlags = 0;
     NvOutputTopology outputTopology;

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QSemaphore>
+#include "backend/teraguchi/macdisplaybinding.h"
+#include "backend/teraguchi/studiosetup.h"
 #include <QSize>
 #include <QStringList>
 #include <QVector>
@@ -21,8 +23,13 @@
 #include "video/overlaymanager.h"
 #include "videopacketlosswindow.h"
 #include "plankreconnectpolicy.h"
+#ifdef Q_OS_MACOS
+#include "clipboardpolltimer.h"
+#endif
 
 class ComputerManager;
+class AssignmentWatch;
+class TailscaleWorkstations;
 class PlankToolbar;
 class MacClipboardSync;
 #ifdef PLANK_TRANSPORT
@@ -135,8 +142,15 @@ public:
     Q_INVOKABLE void exec(QWindow* qtWindow);
 
     Q_INVOKABLE void cancelConnectionStart();
+    Q_INVOKABLE void requestDisconnect();
+    void bindAssignedDisplays(const MacDisplayBinding::Selection& selection) { m_AssignedDisplays = selection; }
+    void bindAssignedTarget(TailscaleWorkstations* provider, const QVariantMap& target, int displays, TeraguchiStudio::Lease permit);
+    void setAssignedCredentials(QString username, QString password);
 
     Q_INVOKABLE void respondToActiveSessionTakeover(bool takeOver);
+
+    // Assigned artist sessions cannot offer or perform takeover.
+    void disableActiveSessionTakeover() { m_AllowActiveSessionTakeover = false; }
 
     static
     void getDecoderInfo(SDL_Window* window,
@@ -156,6 +170,15 @@ public:
     void flushWindowEvents();
 
     static void postTabletCursorActivationEvent();
+
+    void rejectVideoContract();
+    void rejectPenInput();
+#ifdef Q_OS_MACOS
+    void rejectKeyboardInput(bool permissionFailure);
+    bool routeMacPenToToolbar(SDL_PenID pen, SDL_WindowID window, float x, float y,
+                             SDL_PenInputFlags state, Uint64 timestamp);
+    void resetMacPenToolbar();
+#endif
 
     void updateRenderedStats(float fps, float videoMbps)
     {
@@ -180,6 +203,9 @@ signals:
     void stageFailed(QString stage, int errorCode, QString failingPorts);
 
     void connectionStarted();
+    // Native negotiation and real renderer initialization have succeeded.
+    // This is not a hardware qualification or first-presented-frame claim.
+    void presentationReady();
 
     void sessionCleanupWaitChanged(bool waiting, QString text);
 
@@ -196,7 +222,11 @@ signals:
     void readyForDeletion();
 
 private:
+#ifdef Q_OS_MACOS
+    std::atomic_bool m_ApplicationExitRequested{false};
+#endif
     void execInternal();
+    void validateAssignedEndpoint();
 
     bool initialize();
 
@@ -273,6 +303,9 @@ private:
     int getTargetDisplayIndex() const;
 
     bool snapshotClientDisplays();
+    bool usesMacOutputPair() const;
+    bool usesMacBorderlessPresentation() const;
+    bool assignedWindowsCurrent() const;
 
     void rebuildPresentationLayout();
 
@@ -382,6 +415,13 @@ private:
     DECODER_RENDERER_CALLBACKS m_VideoCallbacks;
     AUDIO_RENDERER_CALLBACKS m_AudioCallbacks;
     NvComputer* m_Computer;
+    std::unique_ptr<NvComputer> m_AssignedComputer;
+    std::unique_ptr<AssignmentWatch> m_AssignmentWatch;
+    TeraguchiStudio::Lease m_StudioPermit;
+    MacDisplayBinding::Selection m_AssignedDisplays;
+    int m_AssignedDisplayCount = 0;
+    std::atomic_bool m_DisconnectRequested{false};
+    bool m_PresentationReady = false;
     StreamingPreferences::PlankVideoProfile m_PlankVideoProfile;
     StreamingPreferences::PlankCaptureSource m_PlankCaptureSource;
 #ifdef PLANK_TRANSPORT
@@ -404,6 +444,15 @@ private:
     bool m_ThreadedExec;
     bool m_UnexpectedTermination;
     std::atomic_bool m_ReconnectRequested;
+    std::atomic_bool m_VideoContractRejected {false};
+    std::atomic_bool m_PenInputRejected {false};
+#ifdef Q_OS_MACOS
+    SDL_PenID m_ToolbarPen = 0;
+    SDL_PenInputFlags m_ToolbarPenButtons = 0;
+    bool m_PenDisconnectRequested = false;
+    bool m_KeyboardInputRejected = false;
+    bool m_KeyboardPermissionFailure = false;
+#endif
     std::atomic<Uint64> m_DesktopHandoffNoticeDeadline {0};
     std::atomic_bool m_ReconnectGreeterConfirmed {false};
     std::atomic<Uint64> m_LastPlankVideoReceived {0};
@@ -415,6 +464,7 @@ private:
     std::atomic_bool m_CanReconnect;
     std::atomic_bool m_ConnectionStartCancelled;
     std::atomic_bool m_WaitingForSessionCleanup;
+    bool m_AllowActiveSessionTakeover = true;
     std::atomic_bool m_WaitingForActiveSessionTakeoverDecision {false};
     std::atomic_int m_ActiveSessionTakeoverDecision {0};
     QString m_PlankUsername;
@@ -428,6 +478,7 @@ private:
         SDL_Rect logicalBounds = {};
         QSize nativeSize;
         QSize macBackingSize;
+        QRect macMatchedBounds;
         QRect canvasRect;
     };
     QVector<ClientDisplaySnapshot> m_ClientDisplays;
@@ -460,7 +511,7 @@ private:
     std::unique_ptr<PlankToolbar> m_PlankToolbar;
 #ifdef Q_OS_MACOS
     std::unique_ptr<MacClipboardSync> m_ClipboardSync;
-    std::uint32_t m_ClipboardPollTimerId = 0;
+    ClipboardPollTimer m_ClipboardPollTimer;
 #endif
     std::atomic<float> m_CurrentRenderedFps;
     std::atomic<float> m_CurrentVideoMbps;

@@ -100,6 +100,111 @@ NvHTTP::NvHTTP(NvComputer* computer, QNetworkAccessManager* nam) :
     NvHTTP(computer->activeAddress, nam)
 {
     setPlankSessionToken(computer->sessionToken);
+    setHostTrust(computer->assignedHostTrust);
+}
+
+void NvHTTP::setHostTrust(TeraguchiStudio::HostLease trust, std::function<bool()> permitted)
+{
+    m_HostTrust = std::move(trust);
+    m_HostRequestPermitted = std::move(permitted);
+}
+
+bool NvHTTP::hostRequestPermitted(const QUrl& url) const
+{
+    return m_HostTrust && m_HostTrust->permits(url) &&
+            (!m_HostRequestPermitted || m_HostRequestPermitted());
+}
+
+QNetworkReply* NvHTTP::pinnedRequest(QNetworkRequest request, const QByteArray& body, bool post, int timeoutMs)
+{
+    const auto url = request.url();
+    const QStringList getPaths {"/serverinfo", "/applist", "/plank/topology", "/launch", "/resume"};
+    const QStringList postPaths {"/plank/auth/start", "/plank/auth/respond"};
+    if (!hostRequestPermitted(url) || !(post ? postPaths : getPaths).contains(url.path()) ||
+            (post && !url.query().isEmpty()))
+        throw GfeHttpResponseException(401, "Workstation trust is missing, expired or changed. Import current studio setup.");
+    m_LastPinnedCertificate.clear();
+    request.setSslConfiguration(plankSslConfiguration());
+    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+    request.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+    request.setAttribute(QNetworkRequest::CookieLoadControlAttribute, QNetworkRequest::Manual);
+    request.setAttribute(QNetworkRequest::CookieSaveControlAttribute, QNetworkRequest::Manual);
+    // Qt guarantees encrypted() before HTTP bytes on the first connection in a
+    // manager. A fresh manager per request also rechecks every PAM round/reconnect.
+    auto manager = std::make_unique<QNetworkAccessManager>(this);
+    manager->setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
+    bool checked = false;
+    bool sawSslErrors = false;
+    const auto matches = [this, url](QNetworkReply* reply) {
+        const auto ssl = negotiatedPlankTls(reply);
+        return hostRequestPermitted(url) && reply->url() == url &&
+                ssl.sessionProtocol() == QSsl::TlsV1_3 && isPlankCertificate(ssl.peerCertificate()) &&
+                m_HostTrust->accepts(ssl.peerCertificate().digest(QCryptographicHash::Sha256));
+    };
+    connect(manager.get(), &QNetworkAccessManager::sslErrors, manager.get(),
+            [this, url, &sawSslErrors](QNetworkReply* reply, const QList<QSslError>& errors) {
+        sawSslErrors = true;
+        if (hostRequestPermitted(url) && reply->url() == url &&
+                m_HostTrust->accepts(reply->sslConfiguration().peerCertificate().digest(QCryptographicHash::Sha256)))
+            handleSslErrors(reply, errors);
+        else reply->abort();
+    });
+    connect(manager.get(), &QNetworkAccessManager::encrypted, manager.get(), [&](QNetworkReply* reply) {
+        reply->setProperty("plankNegotiatedTls", QVariant::fromValue(reply->sslConfiguration()));
+        checked = matches(reply);
+        if (!checked) reply->abort();
+    });
+    QScopedPointer<QNetworkReply> reply(post ? manager->post(request, body) : manager->get(request));
+    const qint64 limit = post ? 32768 : 1048576;
+    reply->setReadBufferSize(limit + 1);
+    bool oversized = false;
+    QEventLoop loop;
+    connect(reply.data(), &QNetworkReply::readyRead, &loop, [&] {
+        if (reply->bytesAvailable() > limit) { oversized = true; reply->abort(); }
+    });
+    connect(reply.data(), &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, &loop, &QEventLoop::quit);
+    QTimer timer;
+    timer.setSingleShot(true);
+    bool timedOut = false;
+    connect(&timer, &QTimer::timeout, &loop, [&] { timedOut = true; loop.quit(); });
+    timer.start(timeoutMs > 0 ? timeoutMs : REQUEST_TIMEOUT_MS);
+    if (!reply->isFinished()) loop.exec(QEventLoop::ExcludeUserInputEvents);
+    if (!reply->isFinished()) reply->abort();
+    QObject::disconnect(manager.get(), nullptr, nullptr, nullptr);
+    // A restarting display worker may not be listening yet. No certificate
+    // was evaluated in that case, so retain the network failure type used by
+    // the bounded startup/reconnect wait. Never reclassify a TLS rejection or
+    // a revoked setup/assignment, and never send HTTP before verification.
+    const auto networkError = reply->error();
+    const bool unavailable = timedOut || networkError == QNetworkReply::ConnectionRefusedError ||
+            networkError == QNetworkReply::RemoteHostClosedError ||
+            networkError == QNetworkReply::HostNotFoundError ||
+            networkError == QNetworkReply::TimeoutError ||
+            networkError == QNetworkReply::TemporaryNetworkFailureError;
+    if (!checked && !sawSslErrors && hostRequestPermitted(url) &&
+            negotiatedPlankTls(reply.data()).peerCertificate().isNull() && unavailable)
+        throw QtNetworkReplyException(timedOut ? QNetworkReply::TimeoutError : networkError,
+                                      "Workstation connection is unavailable or timed out");
+    if (!checked || !matches(reply.data()))
+        throw GfeHttpResponseException(401, "Workstation certificate or setup was rejected. Ask the studio for current setup.");
+    if (oversized || reply->bytesAvailable() > limit)
+        throw GfeHttpResponseException(400, "Workstation response exceeded its size limit");
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (status >= 300 && status < 400)
+        throw GfeHttpResponseException(401, "Workstation redirect was rejected");
+    if (reply->error() != QNetworkReply::NoError) {
+        if (status >= 400)
+            throw GfeHttpResponseException(status, "Workstation request was not accepted");
+        throw QtNetworkReplyException(reply->error(), "Trusted workstation request failed or timed out");
+    }
+    m_LastPinnedCertificate = negotiatedPlankTls(reply.data()).peerCertificate().digest(QCryptographicHash::Sha256);
+    // Keep the reply's network backend alive until the caller consumes it.
+    // No callbacks retaining local references survive this return.
+    connect(reply.data(), &QObject::destroyed, manager.get(), &QObject::deleteLater);
+    manager.release();
+    return reply.take();
 }
 
 void NvHTTP::setAddress(NvAddress address)
@@ -300,6 +405,9 @@ NvHTTP::startApp(QString verb,
         return encoded.size() == 64 && decoded.size() == 32 &&
                 decoded.toHex() == encoded.toLower();
     };
+    if (m_HostTrust && (plankTransportPort != m_HostTrust->port ||
+            QByteArray::fromHex(plankTransportCertificateSha256.toLatin1()) != m_LastPinnedCertificate))
+        throw GfeHttpResponseException(401, "Workstation transport endpoint or certificate changed");
     if (plankTransportPort == 0 ||
             !isCanonicalSha256Hex(plankTransportCertificateSha256) ||
             !isCanonicalSha256Hex(plankTransportToken)) {
@@ -552,6 +660,22 @@ QJsonObject NvHTTP::postPlankJson(QString command, const QJsonObject& body)
 
     QUrl url(m_BaseUrlHttps);
     url.setPath("/plank/auth/" + command);
+    if (m_HostTrust) {
+        QNetworkRequest request(url);
+        request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+        QByteArray data = QJsonDocument(body).toJson(QJsonDocument::Compact);
+        QScopedPointer<QNetworkReply> reply;
+        try { reply.reset(pinnedRequest(request, data, true, REQUEST_TIMEOUT_MS)); }
+        catch (...) { data.fill('\0'); throw; }
+        data.fill('\0');
+        QByteArray response = reply->readAll();
+        QJsonParseError error;
+        const auto document = QJsonDocument::fromJson(response, &error);
+        response.fill('\0');
+        if (error.error != QJsonParseError::NoError || !document.isObject())
+            throw GfeHttpResponseException(400, "Malformed workstation authentication response");
+        return document.object();
+    }
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setSslConfiguration(plankSslConfiguration());
@@ -892,6 +1016,8 @@ NvHTTP::openConnection(QUrl baseUrl,
             request.setRawHeader("Authorization", "Bearer " + m_SessionToken.toUtf8());
         }
     }
+
+    if (m_HostTrust) return pinnedRequest(request, {}, false, timeoutMs);
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     // Disable HTTP/2 (GFE 3.22 doesn't like it) and Qt 6 enables it by default

@@ -1,6 +1,16 @@
 QT += core quick network quickcontrols2 svg
 CONFIG += c++17
 
+contains(CONFIG, teraguchi-strict-video) {
+    !macx: error("Teraguchi strict video is available only for Mac builds")
+    DEFINES += TERAGUCHI_STRICT_VIDEO
+}
+HEADERS += backend/teraguchi/hosttrust.h
+HEADERS += backend/teraguchi/supportdiagnostics.h
+SOURCES += backend/teraguchi/supportdiagnostics.cpp
+HEADERS += streaming/video/decoderpolicy.h \
+    streaming/video/teraguchivideo.h streaming/video/teraguchiframe.h
+
 unix:contains(CONFIG, plank-transport) {
     isEmpty(PLANK_TRANSPORT_DIR) {
         PLANK_TRANSPORT_DIR = $$(PLANK_TRANSPORT_DIR)
@@ -245,7 +255,7 @@ SOURCES += \
     backend/systemproperties.cpp \
     wm.cpp
 
-macx: HEADERS += macquitbridge.h
+macx: HEADERS += macapplication.h
 
 HEADERS += \
     streaming/video/packedbt709.h \
@@ -289,6 +299,19 @@ contains(DEFINES, HAVE_LIBINPUT_TABLET) {
     HEADERS += streaming/input/linuxwacom.h
     SOURCES += streaming/input/linuxrawwacom.cpp
     HEADERS += streaming/input/linuxrawwacom.h
+}
+
+HEADERS += streaming/input/keyboardmap.h
+
+macx {
+    penCursorDiagnostics = $$(PLANK_PEN_CURSOR_DIAGNOSTICS)
+    equals(penCursorDiagnostics, 1): DEFINES += PLANK_PEN_CURSOR_DIAGNOSTICS
+    SOURCES += streaming/input/macpen.cpp streaming/input/pen.cpp
+    HEADERS += streaming/input/macpen.h streaming/mactabletcursor.h
+    OBJECTIVE_SOURCES += streaming/mactabletcursor.mm
+    SOURCES += streaming/input/mackeyboard.cpp streaming/input/macsystemkeys.mm
+    HEADERS += streaming/input/mackeyboard.h streaming/input/macsystemkeys.h
+    LIBS += -framework ApplicationServices -framework Carbon
 }
 
 # Platform-specific renderers and decoders
@@ -456,14 +479,19 @@ macx {
     message(VideoToolbox renderer selected)
 
     SOURCES += \
+        streaming/macquitshortcut.mm \
         streaming/macwindow.mm \
         streaming/video/ffmpeg-renderers/vt_base.mm \
         streaming/video/ffmpeg-renderers/vt_metal.mm
 
     HEADERS += \
+        streaming/macquitshortcut.h \
         streaming/macwindow.h \
+        streaming/macdisplaygeometry.h \
         streaming/video/ffmpeg-renderers/vt.h \
+        streaming/video/ffmpeg-renderers/vt_presentation.h \
         streaming/macclipboardsync.h \
+        streaming/clipboardpolltimer.h \
         streaming/plankclipboard.h
     OBJECTIVE_SOURCES += streaming/macclipboardsync.mm
 }
@@ -638,3 +666,24 @@ isEmpty(PLANK_VERSION) {
 }
 VERSION = "$$section(PLANK_VERSION, -, 0, 0)"
 DEFINES += PLANK_VERSION_STR=\\\"$$PLANK_VERSION\\\"
+
+# Local Tailscale discovery is independent of the transport and credentials.
+HEADERS += backend/teraguchi/macinputpermissions.h backend/teraguchi/macinputaccess.h
+SOURCES += backend/teraguchi/macinputpermissions.cpp
+HEADERS += backend/teraguchi/assignmentwatch.h
+SOURCES += backend/teraguchi/assignmentwatch.cpp
+HEADERS += backend/teraguchi/tailscaleworkstations.h
+SOURCES += backend/teraguchi/tailscaleworkstations.cpp
+
+HEADERS += backend/teraguchi/macdisplaybinding.h
+SOURCES += backend/teraguchi/macdisplaybinding.cpp
+macx: LIBS += -framework ColorSync
+
+HEADERS += streaming/macpresentationwindows.h
+macx: OBJECTIVE_SOURCES += streaming/macpresentationwindows.mm
+
+HEADERS += backend/teraguchi/studiosetup.h
+SOURCES += backend/teraguchi/studiosetup.cpp
+!include($$PWD/backend/teraguchi/studiotrust.pri): error(Cannot configure studio verification)
+
+HEADERS += streaming/planktabletcursor.h
