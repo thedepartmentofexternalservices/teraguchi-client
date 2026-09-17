@@ -2165,6 +2165,15 @@ bool Session::usesMacOutputPair() const
 #endif
 }
 
+bool Session::usesMacBorderlessPresentation() const
+{
+#ifdef Q_OS_MACOS
+    return m_AssignedDisplayCount >= 1 && m_AssignedDisplayCount <= 2;
+#else
+    return false;
+#endif
+}
+
 bool Session::assignedWindowsCurrent() const
 {
     if (!m_AssignedDisplayCount) return true;
@@ -2178,7 +2187,7 @@ bool Session::assignedWindowsCurrent() const
                 SDL_GetDisplayForWindow(window) != display.displayId ||
                 bounds.x != display.logicalBounds.x || bounds.y != display.logicalBounds.y ||
                 bounds.w != display.logicalBounds.w || bounds.h != display.logicalBounds.h) return false;
-        if (usesMacOutputPair() && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN)) return false;
+        if (usesMacBorderlessPresentation() && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN)) return false;
     }
     return true;
 }
@@ -2218,6 +2227,9 @@ bool Session::snapshotClientDisplays()
             m_ClientDisplays.append(snapshot);
         }
         m_UseMultiDisplayPresentation = m_AssignedDisplayCount == 2;
+#ifdef Q_OS_MACOS
+        MacPresentationWindows::logDisplaySpacePolicy();
+#endif
         return m_TargetDisplayId && MacDisplayBinding::current(m_AssignedDisplays);
     }
 #ifdef Q_OS_DARWIN
@@ -2476,8 +2488,13 @@ bool Session::anyPresentationWindowFocused() const
 void Session::setPresentationWindowsFullscreen(bool fullscreen)
 {
 #ifdef Q_OS_MACOS
-    if (usesMacOutputPair()) {
-        bool placed = m_SecondaryWindows.size() == 1 && MacDisplayBinding::current(m_AssignedDisplays);
+    if (usesMacBorderlessPresentation()) {
+        if (usesMacOutputPair() && m_SecondaryWindows.size() != 1) {
+            requestDisconnect();
+            emit displayLaunchError(tr("The second presentation window is unavailable."));
+            return;
+        }
+        bool placed = MacDisplayBinding::current(m_AssignedDisplays);
         int secondary = 0;
         for (const auto& display : m_ClientDisplays) {
             auto* window = display.displayId == m_TargetDisplayId ? m_Window : m_SecondaryWindows.value(secondary++, nullptr);
@@ -2939,7 +2956,8 @@ void Session::updateOptimalWindowDisplayMode()
 
 void Session::toggleFullscreen()
 {
-    bool fullScreen = usesMacOutputPair() ? !m_PresentationFullscreen : !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
+    bool fullScreen = usesMacBorderlessPresentation() ? !m_PresentationFullscreen :
+            !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
 
     if (m_UseMultiDisplayPresentation) {
         SDL_LockSpinlock(&m_DecoderLock);
@@ -4112,13 +4130,14 @@ void Session::execInternal()
 
     // We always want a resizable window with High DPI enabled
     Uint32 defaultWindowFlags = SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE;
-    if (createWaylandFullscreen && !presentationMappingDeferred) {
+    if (createWaylandFullscreen && !presentationMappingDeferred &&
+            !usesMacBorderlessPresentation()) {
         // Enter compositor-native fullscreen on the initial configure. This
         // prevents SDL from binding pointer input to an intermediate windowed
         // viewport before the fullscreen surface exists.
         defaultWindowFlags |= m_FullScreenFlag;
     }
-    if (usesMacOutputPair()) defaultWindowFlags |= SDL_WINDOW_HIDDEN;
+    if (usesMacBorderlessPresentation()) defaultWindowFlags |= SDL_WINDOW_HIDDEN;
     if (presentationMappingDeferred) {
         // Decoder selection can switch the SDL window between OpenGL and
         // Vulkan. SDL implements that switch by recreating the native Wayland
@@ -4243,7 +4262,7 @@ void Session::execInternal()
         }
     }
 
-    if (!m_IsFullScreen && !usesMacOutputPair()) {
+    if (!m_IsFullScreen && !usesMacBorderlessPresentation()) {
         // Windowed means a normal compositor-managed desktop window. Do not
         // inherit a maximized launcher state that can make it indistinguishable
         // from borderless mode on Wayland.
@@ -4316,8 +4335,8 @@ void Session::execInternal()
     // for if/when we enter full-screen mode.
     updateOptimalWindowDisplayMode();
 
-    // Enter full screen if requested; a Mac pair also places both windowed outputs.
-    if (m_IsFullScreen || usesMacOutputPair()) {
+    // Enter full screen if requested; assigned Mac outputs use borderless placement.
+    if (m_IsFullScreen || usesMacBorderlessPresentation()) {
         if (presentationMappingDeferred) {
             // Keep the initial window normally sized and hidden through all
             // graphics-backend probes. Fullscreen is queued immediately before
@@ -4387,7 +4406,9 @@ void Session::execInternal()
             m_PlankToolbar.reset(new PlankToolbar(
                         m_Window, m_OverlayManager, *m_InputHandler,
                         *m_Preferences, m_PlankBitrateKbps));
-            if (usesMacOutputPair()) m_PlankToolbar->setPresentationFullscreen(m_PresentationFullscreen);
+            if (usesMacBorderlessPresentation()) {
+                m_PlankToolbar->setPresentationFullscreen(m_PresentationFullscreen);
+            }
         }
     };
     if (!presentationMappingDeferred) {

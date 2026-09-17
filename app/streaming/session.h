@@ -298,6 +298,7 @@ private:
 
     bool snapshotClientDisplays();
     bool usesMacOutputPair() const;
+    bool usesMacBorderlessPresentation() const;
     bool assignedWindowsCurrent() const;
 
     void rebuildPresentationLayout();

@@ -3,6 +3,7 @@
 #include <QRect>
 
 namespace MacPresentationWindows {
+void logDisplaySpacePolicy();
 inline bool needsHiddenSystemUi(bool fullscreen, SDL_WindowFlags primary, SDL_WindowFlags secondary)
 {
     const auto combined = primary | secondary;
