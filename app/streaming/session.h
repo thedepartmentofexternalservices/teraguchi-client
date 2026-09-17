@@ -23,6 +23,9 @@
 #include "video/overlaymanager.h"
 #include "videopacketlosswindow.h"
 #include "plankreconnectpolicy.h"
+#ifdef Q_OS_MACOS
+#include "clipboardpolltimer.h"
+#endif
 
 class ComputerManager;
 class AssignmentWatch;
@@ -505,7 +508,7 @@ private:
     std::unique_ptr<PlankToolbar> m_PlankToolbar;
 #ifdef Q_OS_MACOS
     std::unique_ptr<MacClipboardSync> m_ClipboardSync;
-    std::uint32_t m_ClipboardPollTimerId = 0;
+    ClipboardPollTimer m_ClipboardPollTimer;
 #endif
     std::atomic<float> m_CurrentRenderedFps;
     std::atomic<float> m_CurrentVideoMbps;
